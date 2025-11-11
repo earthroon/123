@@ -1,23 +1,20 @@
-/* ==========================
-   NotePulse.css — 감응 주석 스타일
-   ========================== */
 .note-pulse {
   position: relative;
   display: inline-block;
   margin-left: 1px;
-  font-size: 0.9em;
+  font-size: 0.8em;
+  font-weight: 700;
   color: var(--note-color, #A2603C);
   vertical-align: super;
   cursor: help;
-  animation: pulseIn .25s ease;
   user-select: none;
+  transition: transform .15s ease, opacity .15s ease;
+}
+.note-pulse:hover {
+  transform: scale(1.1);
 }
 
-@keyframes pulseIn {
-  from { transform: scale(0.6); opacity: 0; }
-  to   { transform: scale(1); opacity: 1; }
-}
-
+/* 툴팁 */
 .note-pulse::after {
   content: attr(data-note);
   position: absolute;
@@ -27,12 +24,12 @@
   background: var(--note-bg, #FFF8EE);
   color: #3A2A1E;
   border: 1px solid rgba(0,0,0,.12);
-  border-radius: 8px;
-  box-shadow: 0 6px 20px rgba(0,0,0,.15);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.12);
   font-size: 12.5px;
-  line-height: 1.4;
-  padding: 6px 8px;
-  max-width: 280px;
+  line-height: 1.45;
+  padding: 5px 7px;
+  max-width: 260px;
   width: max-content;
   opacity: 0;
   pointer-events: none;
