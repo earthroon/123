@@ -1,0 +1,20 @@
+/* [ΔK] SuperNumberParser Style — responsive inline layout */
+.supernum,
+.supernum-text {
+  display: inline !important;
+  white-space: nowrap !important;
+  line-height: 1.2;
+  font-weight: 700;
+}
+
+.supernum {
+  font-size: clamp(1.4rem, 3vw, 2.8rem);
+  vertical-align: middle;
+  margin-right: 0.15em;
+  color: #222;
+}
+
+.supernum-text {
+  font-size: clamp(1.2rem, 2.6vw, 2.2rem);
+  color: #333;
+}
