@@ -1,26 +1,27 @@
-/* [ΔK] NumberParser Style — No-break inline group */
+/* [ΔK] NumberParser Style — Safe version (keeps Super styles intact) */
+
+/* 그룹 전체: 불가분 인라인 블록 */
 .supernum-group {
-  display: inline-flex !important;
-  align-items: baseline;
-  white-space: nowrap !important;
-  gap: 0.15em;               /* 숫자-텍스트 사이 미세 간격 */
+  display: inline-block;
+  vertical-align: baseline;
+  white-space: nowrap;
   line-height: 1.2;
 }
 
-/* 숫자: 본문 약 2배 */
+/* 숫자: 본문 대비 약 2x (줄바꿈 금지 내부에서만) */
 .supernum {
   font-size: clamp(1.6rem, 3.2vw, 3.2rem);
   font-weight: 700;
-  color: #222;
   line-height: 1;
-  white-space: nowrap !important;
+  color: #222;
+  white-space: nowrap;
 }
 
-/* 텍스트: 본문 약 1.5배 */
+/* 텍스트: 본문 대비 약 1.5x */
 .supernum-text {
   font-size: clamp(1.2rem, 2.4vw, 2.4rem);
   font-weight: 600;
-  color: #333;
   line-height: 1;
-  white-space: nowrap !important;
+  color: #333;
+  white-space: nowrap;
 }
