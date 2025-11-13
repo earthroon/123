@@ -1,0 +1,20 @@
+.superheading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 32px 0 12px;
+  padding: 4px 8px;
+  border-radius: 5px;
+}
+
+.superheading .sh-num {
+  font-size: 2em;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.superheading .sh-text {
+  font-size: 1.5em;
+  font-weight: 700;
+  line-height: 1.2;
+}
