@@ -1,68 +1,84 @@
-// [ΔK] NumberParser — Super/Notion-compatible block parser
+// [ΔK] NumberParser — Super-safe hydration parser
 (() => {
 
-  const BLOCK_SELECTOR = ".notion-text, .notion-callout, .notion-page-content, .super-content";
+  const SELECTOR = ".notion-text, .notion-callout, .notion-page-content, .super-content";
   const REGEX = /\[(\d+)\]([\s\S]*?)\[\/\1\]/gs;
 
   function parseBlock(block) {
-    // 1. 블록 내 텍스트를 “연결된 하나의 스트림”으로 추출
+    // 이미 파싱된 블록은 재파싱 금지
+    if (block.dataset._supernumParsed === "1") return;
+
     const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
-    const nodes = [];
     let raw = "";
 
     while (walker.nextNode()) {
-      nodes.push(walker.currentNode);
       raw += walker.currentNode.textContent;
     }
 
-    if (!REGEX.test(raw)) return;  // 패턴 없으면 skip
+    if (!REGEX.test(raw)) return;
     REGEX.lastIndex = 0;
 
-    // 2. 블록 전체 내용 제거
+    // 기존 내용 제거
     while (block.firstChild) block.removeChild(block.firstChild);
 
-    // 3. 패턴 기반으로 노드 재구성
     let last = 0;
     let match;
 
     while ((match = REGEX.exec(raw)) !== null) {
       const [full, num, text] = match;
 
-      // 앞부분
       if (match.index > last) {
         block.appendChild(document.createTextNode(raw.slice(last, match.index)));
       }
 
-      // <span class="supernum">200</span>
-      const numEl = document.createElement("span");
-      numEl.className = "supernum";
-      numEl.textContent = num;
+      const group = document.createElement("span");
+      group.className = "supernum-group";
 
-      // <span class="supernum-text">내용</span>
-      const txtEl = document.createElement("span");
-      txtEl.className = "supernum-text";
-      txtEl.textContent = text;
+      const n = document.createElement("span");
+      n.className = "supernum";
+      n.textContent = num;
 
-      block.append(numEl, txtEl);
+      const t = document.createElement("span");
+      t.className = "supernum-text";
+      t.textContent = text;
+
+      group.append(n, t);
+      block.appendChild(group);
+
       last = match.index + full.length;
     }
 
-    // 4. 마지막 남은 텍스트
     if (last < raw.length) {
       block.appendChild(document.createTextNode(raw.slice(last)));
     }
+
+    block.dataset._supernumParsed = "1";
   }
 
-  function runParser() {
-    document.querySelectorAll(BLOCK_SELECTOR).forEach(parseBlock);
+  function runOnce() {
+    document.querySelectorAll(SELECTOR).forEach(block => {
+      parseBlock(block);
+
+      // 블록 단위로 최소 감시: Super의 재렌더 트리거 시만 재파싱
+      observeBlock(block, parseBlock);
+    });
   }
 
-  // DOM 준비되면 1회 실행
-  if (document.readyState !== "loading") runParser();
-  else document.addEventListener("DOMContentLoaded", runParser);
+  function observeBlock(block, cb) {
+    const obs = new MutationObserver(() => cb(block));
+    obs.observe(block, { childList: true, subtree: true });
+  }
 
-  // Super 특성: 페이지 변화 시도 감지
-  const obs = new MutationObserver(() => runParser());
-  obs.observe(document.body, { childList: true, subtree: true });
+  // Super hydration 완료 시점까지만 대기
+  function waitForHydration(cb) {
+    const check = () => {
+      const root = document.querySelector(".notion-page-content[data-reactroot]");
+      if (root) cb();
+      else requestAnimationFrame(check);
+    };
+    requestAnimationFrame(check);
+  }
+
+  waitForHydration(runOnce);
 
 })();
