@@ -1,84 +1,68 @@
-// [ΔK] NumberParser — Super-safe hydration parser
+// [ΔK] NumberParser — true DOM-safe parser (Super-safe, weak authority)
 (() => {
+  function parseNode(node) {
+    if (node.nodeType !== Node.TEXT_NODE) return;
 
-  const SELECTOR = ".notion-text, .notion-callout, .notion-page-content, .super-content";
-  const REGEX = /\[(\d+)\]([\s\S]*?)\[\/\1\]/gs;
+    const text = node.textContent;
+    // 핵심 수정 → 개행·다중라인 대응
+    const regex = /\[(\d+)\]([\s\S]*?)\[\/\1\]/g;
 
-  function parseBlock(block) {
-    // 이미 파싱된 블록은 재파싱 금지
-    if (block.dataset._supernumParsed === "1") return;
-
-    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
-    let raw = "";
-
-    while (walker.nextNode()) {
-      raw += walker.currentNode.textContent;
-    }
-
-    if (!REGEX.test(raw)) return;
-    REGEX.lastIndex = 0;
-
-    // 기존 내용 제거
-    while (block.firstChild) block.removeChild(block.firstChild);
-
-    let last = 0;
     let match;
+    const fragments = [];
+    let lastIndex = 0;
 
-    while ((match = REGEX.exec(raw)) !== null) {
-      const [full, num, text] = match;
+    while ((match = regex.exec(text)) !== null) {
+      const [full, num, content] = match;
 
-      if (match.index > last) {
-        block.appendChild(document.createTextNode(raw.slice(last, match.index)));
+      if (match.index > lastIndex) {
+        fragments.push(
+          document.createTextNode(text.slice(lastIndex, match.index))
+        );
       }
 
-      const group = document.createElement("span");
-      group.className = "supernum-group";
+      const numEl = document.createElement("span");
+      numEl.className = "supernum";
+      numEl.textContent = num;
 
-      const n = document.createElement("span");
-      n.className = "supernum";
-      n.textContent = num;
+      const textEl = document.createElement("span");
+      textEl.className = "supernum-text";
+      textEl.textContent = content;
 
-      const t = document.createElement("span");
-      t.className = "supernum-text";
-      t.textContent = text;
+      fragments.push(numEl, textEl);
 
-      group.append(n, t);
-      block.appendChild(group);
-
-      last = match.index + full.length;
+      lastIndex = match.index + full.length;
     }
 
-    if (last < raw.length) {
-      block.appendChild(document.createTextNode(raw.slice(last)));
+    if (fragments.length) {
+      if (lastIndex < text.length) {
+        fragments.push(document.createTextNode(text.slice(lastIndex)));
+      }
+
+      const parent = node.parentNode;
+      fragments.forEach(f => parent.insertBefore(f, node));
+      parent.removeChild(node);
     }
-
-    block.dataset._supernumParsed = "1";
   }
 
-  function runOnce() {
-    document.querySelectorAll(SELECTOR).forEach(block => {
-      parseBlock(block);
-
-      // 블록 단위로 최소 감시: Super의 재렌더 트리거 시만 재파싱
-      observeBlock(block, parseBlock);
-    });
+  function traverse(root) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    const textNodes = [];
+    while (walker.nextNode()) textNodes.push(walker.currentNode);
+    textNodes.forEach(parseNode);
   }
 
-  function observeBlock(block, cb) {
-    const obs = new MutationObserver(() => cb(block));
-    obs.observe(block, { childList: true, subtree: true });
+  function runParser() {
+    const targets = document.querySelectorAll(
+      ".notion-text, .notion-callout, .notion-page-content, .super-content"
+    );
+    targets.forEach(traverse);
   }
 
-  // Super hydration 완료 시점까지만 대기
-  function waitForHydration(cb) {
-    const check = () => {
-      const root = document.querySelector(".notion-page-content[data-reactroot]");
-      if (root) cb();
-      else requestAnimationFrame(check);
-    };
-    requestAnimationFrame(check);
-  }
+  // 초기 실행
+  if (document.readyState !== "loading") runParser();
+  else document.addEventListener("DOMContentLoaded", runParser);
 
-  waitForHydration(runOnce);
-
+  // MutationObserver — 약한 버전 그대로 유지
+  const observer = new MutationObserver(() => runParser());
+  observer.observe(document.body, { childList: true, subtree: true });
 })();
