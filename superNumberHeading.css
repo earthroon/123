@@ -1,20 +1,19 @@
-.superheading {
-  display: flex;
+/* SuperNumberHeading.css */
+.super-num-heading {
+  display: inline-flex;
   align-items: baseline;
-  gap: 8px;
-  margin: 32px 0 12px;
-  padding: 4px 8px;
-  border-radius: 5px;
+  gap: 0.4em;
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 0.4em 0;
 }
 
-.superheading .sh-num {
+.super-num-heading-number {
   font-size: 2em;
   font-weight: 700;
-  line-height: 1;
 }
 
-.superheading .sh-text {
+.super-num-heading-content {
   font-size: 1.5em;
   font-weight: 700;
-  line-height: 1.2;
 }
