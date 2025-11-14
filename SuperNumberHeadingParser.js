@@ -1,8 +1,7 @@
 // SuperNumberHeadingParser.js
-// <숫자>내용</숫자> → 구조화된 heading span 으로 변환
 (() => {
 
-  const REGEX = /<(\d+)>(.*?)<\/\1>/g;
+  const REGEX = /\[(\d+)\](.*?)\[\/\1\]/g;
 
   function replaceInTextNode(node) {
     const text = node.textContent;
@@ -16,7 +15,6 @@
         frags.push(document.createTextNode(text.slice(last, match.index)));
       }
 
-      // wrapper
       const wrap = document.createElement("span");
       wrap.className = "super-num-heading";
 
@@ -39,7 +37,6 @@
       frags.push(document.createTextNode(text.slice(last)));
     }
 
-    // 교체
     if (frags.length > 0) {
       const parent = node.parentNode;
       frags.forEach(f => parent.insertBefore(f, node));
