@@ -10,14 +10,11 @@
   const FX_MAX_TEXT_NODES = 240;      // 성능 안전장치
   const FX_RECTS_REFRESH_MS = 120;    // DOM/스크롤 갱신 디바운스
 
-  // 근접도: 마우스가 텍스트 라인에서 이 거리 이상 멀면 주입 0에 수렴 (px 느낌값)
+  // 근접도(옵션1): 마우스가 텍스트 라인에서 이 거리 이상 멀면 주입 0에 수렴
   const FX_PROX_FAR_PX = 260;
 
-  // 인터랙티브 요소 위에서는 잉크 강도를 줄인다 (0.35면 “있긴한데 티 거의 없음”)
+  // 옵션2: 인터랙티브 요소 위에서는 잉크 강도를 줄인다
   const FX_UI_ATTEN_INTERACTIVE = 0.35;
-
-  // 디버그
-  const FX_DEBUG = false; // 필요하면 true로
 
   const INTERACTIVE_SELECTOR = [
     "a",
@@ -30,34 +27,19 @@
     "[contenteditable='true']"
   ].join(",");
 
-  // ----------------------------
-  // 0) CSS inject (Super에서 css link 씹히는 경우 대비)
-  // ----------------------------
-  function ensureStyle() {
-    const STYLE_ID = "fx-overlay-style";
-    if (document.getElementById(STYLE_ID)) return;
+  // ===== Runtime Config (global override) =====
+  // You can override at runtime:
+  // window.__FX_OVERLAY_CFG__ = { forceProx:true, forceZone:true, strength:0.9, debug:true }
+  const FX_CFG_DEFAULT = {
+    forceProx: false, // true면 proximity gate 무시
+    forceZone: false, // true면 text-line zone 마스크 무시
+    strength: 0.32,   // present alpha strength
+    debug: false,     // status() / counters
+  };
 
-    const st = document.createElement("style");
-    st.id = STYLE_ID;
-    st.textContent = `
-/* Overlay canvas: never blocks Notion/Super UI */
-#${ID}{
-  position: fixed;
-  inset: 0;
-  width: 100vw;
-  height: 100vh;
-  z-index: 999999;
-  pointer-events: none;
-  display: block;
-  opacity: 1;
-  visibility: visible;
-  mix-blend-mode: normal;
-}
-/* Accessibility: respect reduced motion */
-@media (prefers-reduced-motion: reduce){
-  #${ID}{ display:none !important; }
-}`;
-    (document.head || document.documentElement).appendChild(st);
+  function getFxCfg() {
+    const u = window.__FX_OVERLAY_CFG__ || {};
+    return { ...FX_CFG_DEFAULT, ...u };
   }
 
   // ----------------------------
@@ -80,7 +62,6 @@
     const dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
     const w = Math.max(1, Math.floor(window.innerWidth * dpr));
     const h = Math.max(1, Math.floor(window.innerHeight * dpr));
-
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
@@ -99,25 +80,18 @@
     vx: 0, vy: 0,
     down: false,
     t: performance.now(),
-    lastMoveAt: 0,
-    moveCount: 0,
   };
 
   function onPointerMove(e) {
     const now = performance.now();
     const dt = Math.max(1, now - input.t);
-
-    // PointerEvent든 MouseEvent든 clientX/Y는 있음
-    const nx = e.clientX ?? 0;
-    const ny = e.clientY ?? 0;
-
+    const nx = e.clientX;
+    const ny = e.clientY;
     input.vx = (nx - input.x) / dt;
     input.vy = (ny - input.y) / dt;
     input.x = nx;
     input.y = ny;
     input.t = now;
-    input.lastMoveAt = now;
-    input.moveCount++;
   }
   function onPointerDown() { input.down = true; }
   function onPointerUp() { input.down = false; }
@@ -156,7 +130,7 @@
     if (root) {
       root.setAttribute("data-fx-zone", "");
       fxZones = [root];
-      if (FX_DEBUG) console.log("[FX] default zone applied:", root);
+      // console.log("[FX] default zone applied:", root);
     } else {
       console.warn("[FX] no root found for default zone");
     }
@@ -175,13 +149,10 @@
       acceptNode(node) {
         if (!node || !node.nodeValue) return NodeFilter.FILTER_REJECT;
         if (!node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
-
         const p = node.parentElement;
         if (!p) return NodeFilter.FILTER_REJECT;
-
         const tag = p.tagName?.toLowerCase();
         if (tag === "script" || tag === "style" || tag === "noscript") return NodeFilter.FILTER_REJECT;
-
         return NodeFilter.FILTER_ACCEPT;
       }
     });
@@ -227,7 +198,6 @@
     }
     rectCache = rects;
     lastRectRefreshAt = performance.now();
-    if (FX_DEBUG) console.log("[FX dbg] rects=", rectCache.length);
   }
 
   function requestRectsRefresh() {
@@ -249,17 +219,18 @@
   }
 
   // ----------------------------
-  // 6) Interactive hover atten
+  // 6) Interactive hover atten (옵션2)
   // ----------------------------
   function computeUiAtten() {
     const el = document.elementFromPoint(input.x, input.y);
     if (!el) return 1.0;
+
     const hit = el.closest?.(INTERACTIVE_SELECTOR);
     return hit ? FX_UI_ATTEN_INTERACTIVE : 1.0;
   }
 
   // ----------------------------
-  // 7) WebGL2 Ink renderer
+  // 7) WebGL2 Ink renderer (Ping-Pong FBO + Text mask + Proximity + UI atten)
   // ----------------------------
   class WebGL2Renderer extends Renderer {
     constructor(canvas) {
@@ -378,6 +349,7 @@
     async init() {
       const gl = this.gl;
 
+      // vUv: top-left origin (0,0) like DOM
       const vs = `#version 300 es
       precision highp float;
       out vec2 vUv;
@@ -387,7 +359,7 @@
           (gl_VertexID == 2) ? 3.0 : -1.0
         );
         vec2 uv = 0.5 * (p + 1.0);
-        vUv = vec2(uv.x, 1.0 - uv.y); // top-left origin
+        vUv = vec2(uv.x, 1.0 - uv.y);
         gl_Position = vec4(p, 0.0, 1.0);
       }`;
 
@@ -397,18 +369,18 @@
       out vec4 o;
 
       uniform sampler2D uPrev;
-      uniform vec2 uRes;
-      uniform vec2 uMouse;
-      uniform vec2 uVel;
-      uniform float uDown;
-      uniform float uTime;
+      uniform vec2 uRes;        // pixel res
+      uniform vec2 uMouse;      // uv (top-left origin)
+      uniform vec2 uVel;        // uv velocity
+      uniform float uDown;      // 0/1
+      uniform float uTime;      // seconds
 
       uniform int uRectCount;
-      uniform vec4 uRects[16];
-      uniform float uFeather;
+      uniform vec4 uRects[16];  // (x0,y0,x1,y1) in uv, top-left origin
+      uniform float uFeather;   // uv feather for mask edge
 
-      uniform float uProxFar;
-      uniform float uUiAtten;
+      uniform float uProxFar;   // uv distance where proximity -> 0 (if <0 => force prox=1)
+      uniform float uUiAtten;   // 0..1
 
       vec4 blur9(sampler2D t, vec2 uv, vec2 px) {
         vec4 s = vec4(0.0);
@@ -432,12 +404,15 @@
       }
 
       float mouseProximity(vec2 mUv) {
+        // if uProxFar < 0 => force prox=1
+        if (uProxFar < 0.0) return 1.0;
+
         float dmin = 1e6;
         for (int i = 0; i < 16; i++) {
           if (i >= uRectCount) break;
           vec4 r = uRects[i];
           float d = sdBox(mUv, r.xy, r.zw);
-          dmin = min(dmin, max(d, 0.0));
+          dmin = min(dmin, max(d, 0.0)); // 밖에서만 거리로
         }
         return 1.0 - smoothstep(0.0, uProxFar, dmin);
       }
@@ -450,13 +425,16 @@
       void main() {
         vec2 px = 1.0 / uRes;
 
+        // Advection: gently pull ink along motion
         vec2 adv = -uVel * 0.6;
         vec4 prev = texture(uPrev, vUv + adv);
         vec4 diff = blur9(uPrev, vUv + adv, px);
 
+        // Decay
         float decay = 0.985;
         vec4 ink = mix(prev, diff, 0.65) * decay;
 
+        // Injection near mouse
         float press = uDown;
         float speed = clamp(length(uVel) * 120.0, 0.0, 1.0);
 
@@ -466,14 +444,18 @@
 
         float deposit = (0.35 + 0.65 * press) * a + (0.20 + 0.60 * press) * core;
 
+        // Grain
         float grain = 0.02 * sin((vUv.x + vUv.y) * 160.0 + uTime * 3.0);
         deposit *= (1.0 + grain);
 
-        float prox = (uRectCount > 0) ? mouseProximity(uMouse) : 1.0;
+        // Option1: proximity gate
+        float prox = (uRectCount > 0) ? mouseProximity(uMouse) : 0.0;
         deposit *= prox;
 
+        // Option2: interactive atten
         deposit *= uUiAtten;
 
+        // Store only density in alpha
         ink.a = clamp(ink.a + deposit, 0.0, 1.0);
         o = vec4(0.0, 0.0, 0.0, ink.a);
       }`;
@@ -487,8 +469,9 @@
 
       uniform int uRectCount;
       uniform vec4 uRects[16];
-      uniform float uFeather;
+      uniform float uFeather;   // if <0 => force zone=1
       uniform float uUiAtten;
+      uniform float uStrength;
 
       float sdBox(vec2 p, vec2 a, vec2 b) {
         vec2 c = (a + b) * 0.5;
@@ -514,21 +497,24 @@
 
         float a = pow(clamp(ink.a, 0.0, 1.0), 1.35);
 
-        float zone = (uRectCount > 0) ? inZones(vUv) : 1.0;
+        // Text-line mask (forceZone => uFeather < 0)
+        float zone = (uFeather < 0.0) ? 1.0 : ((uRectCount > 0) ? inZones(vUv) : 0.0);
         a *= zone;
 
+        // Subtle paper fiber
         float fiber = 0.02 * sin((vUv.x * 900.0) + (vUv.y * 700.0));
         a *= (1.0 + fiber);
 
+        // Option2: interactive atten also dims the visible ink
         a *= uUiAtten;
 
-        float strength = 0.32;
-        o = vec4(0.0, 0.0, 0.0, a * strength);
+        o = vec4(0.0, 0.0, 0.0, a * uStrength);
       }`;
 
       this.progUpdate = this._link(vs, fsUpdate);
       this.progPresent = this._link(vs, fsPresent);
 
+      // update uniforms
       gl.useProgram(this.progUpdate);
       this.uUpdate.uPrev = gl.getUniformLocation(this.progUpdate, "uPrev");
       this.uUpdate.uRes = gl.getUniformLocation(this.progUpdate, "uRes");
@@ -542,13 +528,16 @@
       this.uUpdate.uProxFar = gl.getUniformLocation(this.progUpdate, "uProxFar");
       this.uUpdate.uUiAtten = gl.getUniformLocation(this.progUpdate, "uUiAtten");
 
+      // present uniforms
       gl.useProgram(this.progPresent);
       this.uPresent.uTex = gl.getUniformLocation(this.progPresent, "uTex");
       this.uPresent.uRectCount = gl.getUniformLocation(this.progPresent, "uRectCount");
       this.uPresent.uRects = gl.getUniformLocation(this.progPresent, "uRects[0]");
       this.uPresent.uFeather = gl.getUniformLocation(this.progPresent, "uFeather");
       this.uPresent.uUiAtten = gl.getUniformLocation(this.progPresent, "uUiAtten");
+      this.uPresent.uStrength = gl.getUniformLocation(this.progPresent, "uStrength");
 
+      // VAO
       this.vao = gl.createVertexArray();
       gl.bindVertexArray(this.vao);
       gl.bindVertexArray(null);
@@ -567,11 +556,13 @@
       const gl = this.gl;
       this._ensurePingPong(w, h);
 
+      const cfg = getFxCfg();
+
       const rectsPx = getCachedTextRectsPx();
 
+      // rect buffer: uv top-left origin
       const rectData = new Float32Array(FX_MAX_RECTS * 4);
       let rc = 0;
-
       for (const r of rectsPx) {
         const x0 = (r.x * dpr) / w;
         const y0 = (r.y * dpr) / h;
@@ -587,22 +578,36 @@
 
       const t = (performance.now() - this.start) / 1000;
 
+      // mouse -> uv (top-left origin)
       const mx = (input.x * dpr) / w;
       const my = (input.y * dpr) / h;
 
+      // velocity -> uv scale
       const velx = (input.vx * dpr) / w;
       const vely = (input.vy * dpr) / h;
 
+      // Option2: UI atten
       const uiAtten = computeUiAtten();
-      const proxFarUv = (FX_PROX_FAR_PX * dpr) / Math.min(w, h);
+
+      // forceProx: uProxFar 음수 => shader에서 prox=1
+      const proxFarUv = cfg.forceProx
+        ? -1.0
+        : (FX_PROX_FAR_PX * dpr) / Math.min(w, h);
+
+      // forceZone: uFeather 음수 => shader에서 zone=1
+      const featherUv = cfg.forceZone
+        ? -1.0
+        : (14 * dpr) / Math.min(w, h);
+
+      const strength = (typeof cfg.strength === "number") ? cfg.strength : 0.32;
 
       const prevIdx = this.cur;
       const nextIdx = 1 - this.cur;
 
-      gl.bindVertexArray(this.vao);
-
       // PASS 1: UPDATE
+      gl.bindVertexArray(this.vao);
       gl.useProgram(this.progUpdate);
+
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo[nextIdx]);
       gl.viewport(0, 0, w, h);
 
@@ -618,7 +623,7 @@
 
       gl.uniform1i(this.uUpdate.uRectCount, rc);
       gl.uniform4fv(this.uUpdate.uRects, rectData);
-      gl.uniform1f(this.uUpdate.uFeather, (14 * dpr) / Math.min(w, h));
+      gl.uniform1f(this.uUpdate.uFeather, featherUv);
 
       gl.uniform1f(this.uUpdate.uProxFar, proxFarUv);
       gl.uniform1f(this.uUpdate.uUiAtten, uiAtten);
@@ -632,15 +637,15 @@
       gl.viewport(0, 0, w, h);
 
       gl.useProgram(this.progPresent);
-
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.tex[this.cur]);
       gl.uniform1i(this.uPresent.uTex, 0);
 
       gl.uniform1i(this.uPresent.uRectCount, rc);
       gl.uniform4fv(this.uPresent.uRects, rectData);
-      gl.uniform1f(this.uPresent.uFeather, (14 * dpr) / Math.min(w, h));
+      gl.uniform1f(this.uPresent.uFeather, featherUv);
       gl.uniform1f(this.uPresent.uUiAtten, uiAtten);
+      gl.uniform1f(this.uPresent.uStrength, strength);
 
       gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -669,73 +674,10 @@
   }
 
   // ----------------------------
-  // 8) Robust event arming (Super “살균” 대응)
-  // ----------------------------
-  function armInputListeners() {
-    const targets = [];
-    targets.push({ t: window, name: "win" });
-    targets.push({ t: document, name: "doc" });
-    targets.push({ t: document.documentElement, name: "docEl" });
-
-    try {
-      if (window.top && window.top !== window && window.top.location && window.top.document) {
-        targets.push({ t: window.top, name: "topWin" });
-        targets.push({ t: window.top.document, name: "topDoc" });
-        targets.push({ t: window.top.document.documentElement, name: "topDocEl" });
-      }
-    } catch (e) { /* cross origin ignore */ }
-
-    const optsCap = { passive: true, capture: true };
-    const optsBub = { passive: true, capture: false };
-
-    const move = (e) => onPointerMove(e);
-    const down = () => onPointerDown();
-    const up = () => onPointerUp();
-
-    const moveTypes = ["pointermove", "mousemove"];
-    const downTypes = ["pointerdown", "mousedown"];
-    const upTypes = ["pointerup", "mouseup"];
-
-    for (const { t } of targets) {
-      for (const type of moveTypes) {
-        t.addEventListener(type, move, optsCap);
-        t.addEventListener(type, move, optsBub);
-      }
-      for (const type of downTypes) {
-        t.addEventListener(type, down, optsCap);
-        t.addEventListener(type, down, optsBub);
-      }
-      for (const type of upTypes) {
-        t.addEventListener(type, up, optsCap);
-        t.addEventListener(type, up, optsBub);
-      }
-    }
-
-    return () => {
-      for (const { t } of targets) {
-        for (const type of moveTypes) {
-          t.removeEventListener(type, move, optsCap);
-          t.removeEventListener(type, move, optsBub);
-        }
-        for (const type of downTypes) {
-          t.removeEventListener(type, down, optsCap);
-          t.removeEventListener(type, down, optsBub);
-        }
-        for (const type of upTypes) {
-          t.removeEventListener(type, up, optsCap);
-          t.removeEventListener(type, up, optsBub);
-        }
-      }
-    };
-  }
-
-  // ----------------------------
-  // 9) Boot
+  // 8) Boot
   // ----------------------------
   async function boot() {
     if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-
-    ensureStyle();
 
     const canvas = ensureCanvas();
     const size = resizeCanvas(canvas);
@@ -754,7 +696,18 @@
       return;
     }
 
-    const unarm = armInputListeners();
+    // Events
+    window.addEventListener("pointermove", (e) => {
+      onPointerMove(e);
+      requestRectsRefresh();
+    }, { passive: true });
+
+    window.addEventListener("pointerdown", () => {
+      onPointerDown();
+      requestRectsRefresh();
+    }, { passive: true });
+
+    window.addEventListener("pointerup", onPointerUp, { passive: true });
 
     window.addEventListener("resize", () => {
       const s = resizeCanvas(canvas);
@@ -793,40 +746,60 @@
     };
     requestAnimationFrame(tick);
 
+    // ===== public API =====
     window.__FX_OVERLAY__ = {
       stop() {
         alive = false;
-        try { unarm?.(); } catch (e) {}
         mo.disconnect();
         renderer.destroy();
+        try { window.removeEventListener("pointerup", onPointerUp); } catch(e) {}
       },
+
       status() {
+        const c = document.getElementById(ID);
+        const gl = c?.getContext?.("webgl2");
+        const cfg = getFxCfg();
+
+        let sample = null;
+        try {
+          if (gl && c) {
+            const dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
+            const x = Math.floor((input.x || 0) * dpr);
+            const y = Math.floor((c.height - 1) - (input.y || 0) * dpr);
+            const p = new Uint8Array(4);
+            gl.readPixels(
+              Math.max(0, Math.min(c.width - 1, x)),
+              Math.max(0, Math.min(c.height - 1, y)),
+              1, 1, gl.RGBA, gl.UNSIGNED_BYTE, p
+            );
+            sample = [...p];
+          }
+        } catch (e) {
+          sample = { err: String(e) };
+        }
+
         return {
           booted: true,
-          hasCanvas: !!document.getElementById(ID),
-          zones: fxZones.length,
-          rects: rectCache.length,
-          hasGL: !!renderer?.gl,
-          canvas: {
-            display: getComputedStyle(canvas).display,
-            zIndex: getComputedStyle(canvas).zIndex,
-            pointerEvents: getComputedStyle(canvas).pointerEvents,
-            size: [canvas.width, canvas.height]
-          },
-          input: {
-            x: input.x, y: input.y,
-            vx: input.vx, vy: input.vy,
-            down: input.down,
-            lastMoveAt: input.lastMoveAt,
-            moveCount: input.moveCount
-          }
+          inDOM: !!c && document.contains(c),
+          hasGL: !!gl,
+          zones: fxZones?.length || 0,
+          rects: rectCache?.length || 0,
+          input: { x: input.x, y: input.y, down: input.down, vx: input.vx, vy: input.vy },
+          cfg,
+          sampleAtMouse: sample,
+          canvas: c ? {
+            css: {
+              display: getComputedStyle(c).display,
+              zIndex: getComputedStyle(c).zIndex,
+              opacity: getComputedStyle(c).opacity,
+              visibility: getComputedStyle(c).visibility
+            },
+            size: [c.width, c.height]
+          } : null
         };
       }
     };
   }
-
-  // kill previous if exists (hot reload 대응)
-  try { window.__FX_OVERLAY__?.stop?.(); } catch(e){}
 
   if (document.readyState === "complete" || document.readyState === "interactive") {
     boot();
