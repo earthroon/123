@@ -1,3 +1,4 @@
+/* Overlay canvas: never blocks Notion/Super UI */
 #fx-overlay-canvas {
   position: fixed;
   inset: 0;
@@ -6,10 +7,16 @@
   z-index: 999999;
   pointer-events: none;
   display: block;
-  /* optional: some browsers with premultiplied alpha look too subtle */
-  opacity: 1;
 }
 
+/* Optional: blend nicely on paper theme */
+#fx-overlay-canvas {
+  mix-blend-mode: multiply;
+}
+
+/* Accessibility: respect reduced motion */
 @media (prefers-reduced-motion: reduce) {
-  #fx-overlay-canvas { display: none; }
+  #fx-overlay-canvas {
+    display: none !important;
+  }
 }
