@@ -1,5 +1,5 @@
 /* Overlay canvas: never blocks Notion/Super UI */
-#fx-overlay-canvas{
+#fx-overlay-canvas {
   position: fixed;
   inset: 0;
   width: 100vw;
@@ -10,6 +10,6 @@
 }
 
 /* Accessibility: respect reduced motion */
-@media (prefers-reduced-motion: reduce){
-  #fx-overlay-canvas{ display:none; }
+@media (prefers-reduced-motion: reduce) {
+  #fx-overlay-canvas { display: none; }
 }
