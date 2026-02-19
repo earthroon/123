@@ -7,11 +7,16 @@
   z-index: 999999;
   pointer-events: none;
   display: block;
+
+  /* sometimes helps in Super/Notion stacking contexts */
+  top: 0;
+  left: 0;
+
+  /* optional: makes ink feel more “paper-y” */
+  mix-blend-mode: multiply;
 }
 
 /* Accessibility: respect reduced motion */
 @media (prefers-reduced-motion: reduce) {
-  #fx-overlay-canvas {
-    display: none;
-  }
+  #fx-overlay-canvas { display: none; }
 }
