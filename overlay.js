@@ -10,30 +10,55 @@
   const FX_MAX_TEXT_NODES = 240;      // 성능 안전장치
   const FX_RECTS_REFRESH_MS = 120;    // DOM/스크롤 갱신 디바운스
 
-  // 근접도(옵션1)
+  // 근접도: 마우스가 텍스트 라인에서 이 거리 이상 멀면 주입 0에 수렴 (px 느낌값)
   const FX_PROX_FAR_PX = 260;
 
-  // 옵션2: 인터랙티브 요소 위에서는 잉크 강도를 줄인다
+  // 인터랙티브 요소 위에서는 잉크 강도를 줄인다 (0.35면 “있긴한데 티 거의 없음”)
   const FX_UI_ATTEN_INTERACTIVE = 0.35;
 
+  // 디버그
+  const FX_DEBUG = false; // 필요하면 true로
+
   const INTERACTIVE_SELECTOR = [
-    "a","button","input","textarea","select",
-    "[role='button']","[role='link']","[contenteditable='true']"
+    "a",
+    "button",
+    "input",
+    "textarea",
+    "select",
+    "[role='button']",
+    "[role='link']",
+    "[contenteditable='true']"
   ].join(",");
 
   // ----------------------------
-  // 0) Internal debug counters
+  // 0) CSS inject (Super에서 css link 씹히는 경우 대비)
   // ----------------------------
-  const dbg = {
-    booted: false,
-    lastInputAt: 0,
-    moves: 0,
-    downs: 0,
-    ups: 0,
-    lastMoveXY: [0,0],
-    rectCount: 0,
-    zoneCount: 0,
-  };
+  function ensureStyle() {
+    const STYLE_ID = "fx-overlay-style";
+    if (document.getElementById(STYLE_ID)) return;
+
+    const st = document.createElement("style");
+    st.id = STYLE_ID;
+    st.textContent = `
+/* Overlay canvas: never blocks Notion/Super UI */
+#${ID}{
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 999999;
+  pointer-events: none;
+  display: block;
+  opacity: 1;
+  visibility: visible;
+  mix-blend-mode: normal;
+}
+/* Accessibility: respect reduced motion */
+@media (prefers-reduced-motion: reduce){
+  #${ID}{ display:none !important; }
+}`;
+    (document.head || document.documentElement).appendChild(st);
+  }
 
   // ----------------------------
   // 1) Canvas singleton
@@ -55,6 +80,7 @@
     const dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
     const w = Math.max(1, Math.floor(window.innerWidth * dpr));
     const h = Math.max(1, Math.floor(window.innerHeight * dpr));
+
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
@@ -69,41 +95,32 @@
   // 3) Input state
   // ----------------------------
   const input = {
-    x: Math.round(window.innerWidth * 0.5),
-    y: Math.round(window.innerHeight * 0.5),
+    x: 0, y: 0,
     vx: 0, vy: 0,
     down: false,
     t: performance.now(),
+    lastMoveAt: 0,
+    moveCount: 0,
   };
 
-  function onPointerMoveLike(e) {
+  function onPointerMove(e) {
     const now = performance.now();
     const dt = Math.max(1, now - input.t);
-    const nx = e.clientX ?? input.x;
-    const ny = e.clientY ?? input.y;
+
+    // PointerEvent든 MouseEvent든 clientX/Y는 있음
+    const nx = e.clientX ?? 0;
+    const ny = e.clientY ?? 0;
 
     input.vx = (nx - input.x) / dt;
     input.vy = (ny - input.y) / dt;
     input.x = nx;
     input.y = ny;
     input.t = now;
-
-    dbg.lastInputAt = now;
-    dbg.moves++;
-    dbg.lastMoveXY = [nx, ny];
+    input.lastMoveAt = now;
+    input.moveCount++;
   }
-
-  function onDownLike() {
-    input.down = true;
-    dbg.lastInputAt = performance.now();
-    dbg.downs++;
-  }
-
-  function onUpLike() {
-    input.down = false;
-    dbg.lastInputAt = performance.now();
-    dbg.ups++;
-  }
+  function onPointerDown() { input.down = true; }
+  function onPointerUp() { input.down = false; }
 
   // ----------------------------
   // 4) Renderer interface
@@ -125,7 +142,6 @@
 
   function refreshFxZones() {
     fxZones = Array.from(document.querySelectorAll(FX_ZONE_SELECTOR));
-    dbg.zoneCount = fxZones.length;
   }
 
   function ensureDefaultZoneIfNone() {
@@ -140,8 +156,7 @@
     if (root) {
       root.setAttribute("data-fx-zone", "");
       fxZones = [root];
-      dbg.zoneCount = 1;
-      console.log("[FX] default zone applied:", root);
+      if (FX_DEBUG) console.log("[FX] default zone applied:", root);
     } else {
       console.warn("[FX] no root found for default zone");
     }
@@ -160,10 +175,13 @@
       acceptNode(node) {
         if (!node || !node.nodeValue) return NodeFilter.FILTER_REJECT;
         if (!node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+
         const p = node.parentElement;
         if (!p) return NodeFilter.FILTER_REJECT;
+
         const tag = p.tagName?.toLowerCase();
         if (tag === "script" || tag === "style" || tag === "noscript") return NodeFilter.FILTER_REJECT;
+
         return NodeFilter.FILTER_ACCEPT;
       }
     });
@@ -179,6 +197,7 @@
       const pe = textNode.parentElement;
       if (!pe) continue;
 
+      // 부모가 화면 근처에 없으면 스킵
       const pr = pe.getBoundingClientRect();
       if (pr.bottom < 0 || pr.top > window.innerHeight) continue;
       if (pr.right < 0 || pr.left > window.innerWidth) continue;
@@ -207,8 +226,8 @@
       if (rects.length >= FX_MAX_RECTS) break;
     }
     rectCache = rects;
-    dbg.rectCount = rectCache.length;
     lastRectRefreshAt = performance.now();
+    if (FX_DEBUG) console.log("[FX dbg] rects=", rectCache.length);
   }
 
   function requestRectsRefresh() {
@@ -230,7 +249,7 @@
   }
 
   // ----------------------------
-  // 6) Interactive hover atten (옵션2)
+  // 6) Interactive hover atten
   // ----------------------------
   function computeUiAtten() {
     const el = document.elementFromPoint(input.x, input.y);
@@ -255,14 +274,19 @@
       if (!this.gl) throw new Error("WebGL2 not available");
 
       this.start = performance.now();
+
       this.progUpdate = null;
       this.progPresent = null;
+
       this.uUpdate = {};
       this.uPresent = {};
+
       this.fbo = [null, null];
       this.tex = [null, null];
       this.cur = 0;
+
       this.vao = null;
+
       this.W = 0;
       this.H = 0;
     }
@@ -363,7 +387,7 @@
           (gl_VertexID == 2) ? 3.0 : -1.0
         );
         vec2 uv = 0.5 * (p + 1.0);
-        vUv = vec2(uv.x, 1.0 - uv.y);
+        vUv = vec2(uv.x, 1.0 - uv.y); // top-left origin
         gl_Position = vec4(p, 0.0, 1.0);
       }`;
 
@@ -487,6 +511,7 @@
 
       void main() {
         vec4 ink = texture(uTex, vUv);
+
         float a = pow(clamp(ink.a, 0.0, 1.0), 1.35);
 
         float zone = (uRectCount > 0) ? inZones(vUv) : 1.0;
@@ -543,6 +568,7 @@
       this._ensurePingPong(w, h);
 
       const rectsPx = getCachedTextRectsPx();
+
       const rectData = new Float32Array(FX_MAX_RECTS * 4);
       let rc = 0;
 
@@ -558,11 +584,12 @@
         rc++;
         if (rc >= FX_MAX_RECTS) break;
       }
-      dbg.rectCount = rc;
 
       const t = (performance.now() - this.start) / 1000;
+
       const mx = (input.x * dpr) / w;
       const my = (input.y * dpr) / h;
+
       const velx = (input.vx * dpr) / w;
       const vely = (input.vy * dpr) / h;
 
@@ -574,7 +601,7 @@
 
       gl.bindVertexArray(this.vao);
 
-      // UPDATE
+      // PASS 1: UPDATE
       gl.useProgram(this.progUpdate);
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo[nextIdx]);
       gl.viewport(0, 0, w, h);
@@ -592,17 +619,20 @@
       gl.uniform1i(this.uUpdate.uRectCount, rc);
       gl.uniform4fv(this.uUpdate.uRects, rectData);
       gl.uniform1f(this.uUpdate.uFeather, (14 * dpr) / Math.min(w, h));
+
       gl.uniform1f(this.uUpdate.uProxFar, proxFarUv);
       gl.uniform1f(this.uUpdate.uUiAtten, uiAtten);
 
       gl.drawArrays(gl.TRIANGLES, 0, 3);
+
       this.cur = nextIdx;
 
-      // PRESENT
+      // PASS 2: PRESENT
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, w, h);
 
       gl.useProgram(this.progPresent);
+
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.tex[this.cur]);
       gl.uniform1i(this.uPresent.uTex, 0);
@@ -639,46 +669,73 @@
   }
 
   // ----------------------------
-  // 8) Boot
+  // 8) Robust event arming (Super “살균” 대응)
   // ----------------------------
   function armInputListeners() {
+    const targets = [];
+    targets.push({ t: window, name: "win" });
+    targets.push({ t: document, name: "doc" });
+    targets.push({ t: document.documentElement, name: "docEl" });
+
+    try {
+      if (window.top && window.top !== window && window.top.location && window.top.document) {
+        targets.push({ t: window.top, name: "topWin" });
+        targets.push({ t: window.top.document, name: "topDoc" });
+        targets.push({ t: window.top.document.documentElement, name: "topDocEl" });
+      }
+    } catch (e) { /* cross origin ignore */ }
+
     const optsCap = { passive: true, capture: true };
     const optsBub = { passive: true, capture: false };
 
-    const docEl = document.documentElement;
+    const move = (e) => onPointerMove(e);
+    const down = () => onPointerDown();
+    const up = () => onPointerUp();
 
-    // pointer
-    window.addEventListener("pointermove", onPointerMoveLike, optsCap);
-    window.addEventListener("pointermove", onPointerMoveLike, optsBub);
-    document.addEventListener("pointermove", onPointerMoveLike, optsCap);
-    document.addEventListener("pointermove", onPointerMoveLike, optsBub);
-    docEl && docEl.addEventListener("pointermove", onPointerMoveLike, optsCap);
-    docEl && docEl.addEventListener("pointermove", onPointerMoveLike, optsBub);
+    const moveTypes = ["pointermove", "mousemove"];
+    const downTypes = ["pointerdown", "mousedown"];
+    const upTypes = ["pointerup", "mouseup"];
 
-    window.addEventListener("pointerdown", onDownLike, optsCap);
-    window.addEventListener("pointerdown", onDownLike, optsBub);
-    window.addEventListener("pointerup", onUpLike, optsCap);
-    window.addEventListener("pointerup", onUpLike, optsBub);
+    for (const { t } of targets) {
+      for (const type of moveTypes) {
+        t.addEventListener(type, move, optsCap);
+        t.addEventListener(type, move, optsBub);
+      }
+      for (const type of downTypes) {
+        t.addEventListener(type, down, optsCap);
+        t.addEventListener(type, down, optsBub);
+      }
+      for (const type of upTypes) {
+        t.addEventListener(type, up, optsCap);
+        t.addEventListener(type, up, optsBub);
+      }
+    }
 
-    // mouse fallback (일부 환경에서 pointer가 weird하면 이걸로라도 산다)
-    window.addEventListener("mousemove", onPointerMoveLike, optsCap);
-    window.addEventListener("mousemove", onPointerMoveLike, optsBub);
-    document.addEventListener("mousemove", onPointerMoveLike, optsCap);
-    document.addEventListener("mousemove", onPointerMoveLike, optsBub);
-    docEl && docEl.addEventListener("mousemove", onPointerMoveLike, optsCap);
-    docEl && docEl.addEventListener("mousemove", onPointerMoveLike, optsBub);
-
-    window.addEventListener("mousedown", onDownLike, optsCap);
-    window.addEventListener("mouseup", onUpLike, optsCap);
-
-    console.log("[FX] input listeners armed (window/doc/docEl, pointer+mouse, cap+bub)");
+    return () => {
+      for (const { t } of targets) {
+        for (const type of moveTypes) {
+          t.removeEventListener(type, move, optsCap);
+          t.removeEventListener(type, move, optsBub);
+        }
+        for (const type of downTypes) {
+          t.removeEventListener(type, down, optsCap);
+          t.removeEventListener(type, down, optsBub);
+        }
+        for (const type of upTypes) {
+          t.removeEventListener(type, up, optsCap);
+          t.removeEventListener(type, up, optsBub);
+        }
+      }
+    };
   }
 
+  // ----------------------------
+  // 9) Boot
+  // ----------------------------
   async function boot() {
-    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      console.warn("[FX] reduced motion enabled; FX disabled");
-      return;
-    }
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+    ensureStyle();
 
     const canvas = ensureCanvas();
     const size = resizeCanvas(canvas);
@@ -691,22 +748,23 @@
     try {
       renderer = new WebGL2Renderer(canvas);
       await renderer.init();
-      console.log("[FX] WebGL2 ink enabled (inkfix7)");
+      console.log("[FX] WebGL2 ink enabled (text-line masked + proximity + UI atten)");
     } catch (e) {
       console.warn("[FX] WebGL2 failed. FX disabled:", e?.message || e);
       return;
     }
 
-    armInputListeners();
+    const unarm = armInputListeners();
 
-    // layout change watchers
     window.addEventListener("resize", () => {
       const s = resizeCanvas(canvas);
       renderer.resize(s);
       requestRectsRefresh();
     }, { passive: true });
 
-    window.addEventListener("scroll", () => requestRectsRefresh(), { passive: true });
+    window.addEventListener("scroll", () => {
+      requestRectsRefresh();
+    }, { passive: true });
 
     const mo = new MutationObserver(() => {
       refreshFxZones();
@@ -718,11 +776,10 @@
     renderer.resize(size);
 
     let alive = true;
-    dbg.booted = true;
-
     const tick = () => {
       if (!alive) return;
 
+      // detach protection
       if (!document.getElementById(ID)) document.body.appendChild(canvas);
 
       const s = resizeCanvas(canvas);
@@ -739,29 +796,37 @@
     window.__FX_OVERLAY__ = {
       stop() {
         alive = false;
+        try { unarm?.(); } catch (e) {}
         mo.disconnect();
         renderer.destroy();
-        console.log("[FX] stopped");
       },
       status() {
         return {
-          booted: dbg.booted,
-          zones: dbg.zoneCount,
-          rects: dbg.rectCount,
-          moves: dbg.moves,
-          downs: dbg.downs,
-          ups: dbg.ups,
-          lastXY: dbg.lastMoveXY,
-          lastInputMsAgo: dbg.lastInputAt ? Math.round(performance.now() - dbg.lastInputAt) : null,
-          canvas: !!document.getElementById(ID),
-          hasGL: !!(canvas && canvas.getContext && canvas.getContext("webgl2")),
-          href: location.href
+          booted: true,
+          hasCanvas: !!document.getElementById(ID),
+          zones: fxZones.length,
+          rects: rectCache.length,
+          hasGL: !!renderer?.gl,
+          canvas: {
+            display: getComputedStyle(canvas).display,
+            zIndex: getComputedStyle(canvas).zIndex,
+            pointerEvents: getComputedStyle(canvas).pointerEvents,
+            size: [canvas.width, canvas.height]
+          },
+          input: {
+            x: input.x, y: input.y,
+            vx: input.vx, vy: input.vy,
+            down: input.down,
+            lastMoveAt: input.lastMoveAt,
+            moveCount: input.moveCount
+          }
         };
       }
     };
-
-    console.log("[FX] boot complete", window.__FX_OVERLAY__.status());
   }
+
+  // kill previous if exists (hot reload 대응)
+  try { window.__FX_OVERLAY__?.stop?.(); } catch(e){}
 
   if (document.readyState === "complete" || document.readyState === "interactive") {
     boot();
