@@ -1,17 +1,11 @@
-/* Overlay canvas: never blocks Notion/Super UI */
 #fx-overlay-canvas {
-  position: fixed;
-  inset: 0;
-  width: 100vw;
-  height: 100vh;
-  z-index: 999999;
-  pointer-events: none;
-  display: block;
-}
-
-/* Accessibility: respect reduced motion */
-@media (prefers-reduced-motion: reduce) {
-  #fx-overlay-canvas {
-    display: none;
-  }
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  z-index: 2147483647 !important; /* ✅ 확정 최상단 */
+  pointer-events: none !important;
+  display: block !important;
+  opacity: 1 !important;
+  mix-blend-mode: normal !important; /* ✅ 진단용 */
 }
