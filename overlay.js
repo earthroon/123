@@ -769,3 +769,127 @@ void main(){
     document.addEventListener("DOMContentLoaded", boot, { once: true });
   }
 })();
+/* ===========================
+   [INKFIX10] API SSOT + status/dbg + anti-overwrite guard
+   Paste this at the VERY END of overlay.js
+   =========================== */
+(() => {
+  try {
+    const g = (window.top && window.top === window) ? window : window.top;
+    const self = window;
+
+    // If overlay created a local api object earlier, try to reuse it.
+    // If not, create one.
+    const api = (self.__FX_OVERLAY__ && typeof self.__FX_OVERLAY__ === "object")
+      ? self.__FX_OVERLAY__
+      : ((g.__FX_OVERLAY__ && typeof g.__FX_OVERLAY__ === "object") ? g.__FX_OVERLAY__ : {});
+
+    // ---- Ensure canvas id used by overlay
+    const ID = "fx-overlay-canvas";
+
+    // ---- status() : always available
+    api.status = function status() {
+      const c = document.getElementById(ID);
+      let ctx = null;
+      try { ctx = c?.getContext?.("webgl2") ? "webgl2" : (c?.getContext?.("2d") ? "2d" : null); } catch(e) {}
+      const zones = document.querySelectorAll("[data-fx-zone]").length;
+
+      // best-effort rect count (if overlay kept a cache on window)
+      const rects = (window.__FX_RECTS__ && Array.isArray(window.__FX_RECTS__)) ? window.__FX_RECTS__.length : null;
+
+      return {
+        booted: !!c,
+        inDOM: !!c && document.body.contains(c),
+        hasGL: ctx === "webgl2",
+        ctx,
+        zones,
+        rects,
+        canvas: c ? {
+          parent: c.parentElement?.tagName,
+          display: getComputedStyle(c).display,
+          opacity: getComputedStyle(c).opacity,
+          visibility: getComputedStyle(c).visibility,
+          zIndex: getComputedStyle(c).zIndex,
+          pe: getComputedStyle(c).pointerEvents,
+          size: [c.width, c.height]
+        } : null
+      };
+    };
+
+    // ---- dbg : sampling + veil + force ink toggle (overlay must read flags; we add safe fallbacks)
+    api.dbg = api.dbg || {};
+    api.dbg.sample = function sample(x = 12, y = 12) {
+      const c = document.getElementById(ID);
+      if (!c) return { ok:false, reason:"no canvas" };
+      const gl = c.getContext("webgl2");
+      if (!gl) return { ok:false, reason:"no webgl2 ctx" };
+      const buf = new Uint8Array(4);
+      try {
+        gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+        return { ok:true, xy:[x,y], rgba:Array.from(buf) };
+      } catch(e) {
+        return { ok:false, reason:"readPixels failed", e: String(e) };
+      }
+    };
+
+    api.dbg.veil = function veil(mode = "red", alpha = 0.08) {
+      const c = document.getElementById(ID);
+      if (!c) return { ok:false, reason:"no canvas" };
+      const gl = c.getContext("webgl2");
+      if (!gl) return { ok:false, reason:"no webgl2 ctx" };
+
+      // draw a full-screen quad via clear (simple, reliable)
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+      if (mode === "red")  gl.clearColor(1, 0, 0, alpha);
+      else if (mode === "black") gl.clearColor(0, 0, 0, alpha);
+      else gl.clearColor(0, 1, 0, alpha);
+
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      return { ok:true, mode, alpha, note:"If you see tint, canvas is visible on top." };
+    };
+
+    // flag toggles (overlay loop can read these if you wire it; harmless if not)
+    api.dbg.forceInk = function forceInk(on = true) {
+      window.__FX_FORCE_INK__ = !!on;
+      return { ok:true, __FX_FORCE_INK__: window.__FX_FORCE_INK__ };
+    };
+
+    api.dbg.forceZones = function forceZones(on = true) {
+      window.__FX_FORCE_ZONES__ = !!on;
+      return { ok:true, __FX_FORCE_ZONES__: window.__FX_FORCE_ZONES__ };
+    };
+
+    // ---- Anti-overwrite: try to pin the reference in both self + top
+    const pin = () => {
+      try { self.__FX_OVERLAY__ = api; } catch(e) {}
+      try { g.__FX_OVERLAY__ = api; } catch(e) {}
+    };
+    pin();
+
+    // optional hard-pin (may fail if env blocks)
+    try {
+      Object.defineProperty(self, "__FX_OVERLAY__", { value: api, writable: true, configurable: true });
+    } catch(e) {}
+    try {
+      Object.defineProperty(g, "__FX_OVERLAY__", { value: api, writable: true, configurable: true });
+    } catch(e) {}
+
+    // watchdog: if someone overwrites with {stop} only, restore api
+    if (!window.__FX_OVERLAY_GUARD__) {
+      window.__FX_OVERLAY_GUARD__ = setInterval(() => {
+        const a = self.__FX_OVERLAY__;
+        const b = g.__FX_OVERLAY__;
+        const okA = a && typeof a.stop === "function" && typeof a.status === "function";
+        const okB = b && typeof b.stop === "function" && typeof b.status === "function";
+        if (!okA || !okB) pin();
+      }, 700);
+    }
+
+    console.log("[FX] status injected. Try: window.__FX_OVERLAY__.status()");
+  } catch (e) {
+    console.warn("[FX] inkfix10 patch failed:", e);
+  }
+})();
+
