@@ -9,14 +9,25 @@
   display: block;
 }
 
-/* Optional: blend nicely on paper theme */
-#fx-overlay-canvas {
-  mix-blend-mode: multiply;
+/* Optional: tiny debug badge (enabled only when JS turns it on) */
+#fx-debug-badge {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  z-index: 1000000;
+  pointer-events: none;
+  font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(20,20,20,0.75);
+  color: #fff;
+  white-space: pre;
+  display: none;
 }
+#fx-debug-badge.on { display: block; }
 
 /* Accessibility: respect reduced motion */
 @media (prefers-reduced-motion: reduce) {
-  #fx-overlay-canvas {
-    display: none !important;
-  }
+  #fx-overlay-canvas { display: none; }
+  #fx-debug-badge { display: none; }
 }
