@@ -12,7 +12,7 @@
 
   // 근접도(옵션1): 마우스가 텍스트 라인에서 이 거리 이상 멀면 주입 0에 수렴
   // 단위는 "화면의 짧은 변 기준 UV". (대략 60~120px 체감)
-  const FX_PROX_FAR_PX = 110;
+  const FX_PROX_FAR_PX = 260;
 
   // 옵션2: 인터랙티브 요소 위에서는 잉크 강도를 줄인다
   // 0.35면 “있긴 한데 거의 티 안 남” 정도
@@ -104,6 +104,23 @@
   function refreshFxZones() {
     fxZones = Array.from(document.querySelectorAll(FX_ZONE_SELECTOR));
   }
+function ensureDefaultZoneIfNone() {
+  if (fxZones.length > 0) return;
+
+  const root =
+    document.querySelector(".super-content") ||
+    document.querySelector(".notion-page-content") ||
+    document.querySelector("main") ||
+    document.body;
+
+  if (root) {
+    root.setAttribute("data-fx-zone", "");
+    fxZones = [root];
+    console.log("[FX] default zone applied:", root);
+  } else {
+    console.warn("[FX] no root found for default zone");
+  }
+}
 
   function isElementVisible(el) {
     const r = el.getBoundingClientRect();
@@ -491,7 +508,7 @@
         // Option2: interactive atten also dims the visible ink
         a *= uUiAtten;
 
-        float strength = 0.18;
+        float strength = 0.32;
         o = vec4(0.0, 0.0, 0.0, a * strength);
       }`;
 
@@ -655,6 +672,7 @@
     const size = resizeCanvas(canvas);
 
     refreshFxZones();
+    ensureDefaultZoneIfNone();
     requestRectsRefresh();
 
     let renderer = null;
@@ -691,10 +709,11 @@
       requestRectsRefresh();
     }, { passive: true });
 
-    const mo = new MutationObserver(() => {
-      refreshFxZones();
-      requestRectsRefresh();
-    });
+   const mo = new MutationObserver(() => {
+  refreshFxZones();
+  ensureDefaultZoneIfNone(); // ✅ 추가
+  requestRectsRefresh();
+});
     mo.observe(document.body, { childList: true, subtree: true, attributes: true });
 
     renderer.resize(size);
