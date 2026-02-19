@@ -1,7 +1,20 @@
 (() => {
-  // ===== Boot guard (prevent duplicate instances) =====
-  if (window.__FX_OVERLAY_BOOTED__) return;
-  window.__FX_OVERLAY_BOOTED__ = true;
+  "use strict";
+
+  // =========================
+  // FX Overlay SSOT Guard (Super/Next safe)
+  // =========================
+  // - 중복 로드 방지
+  // - booted/alive SSOT 플래그 봉인
+  // - DOM 갈아엎힘(Next/Super) 상황에서 reattach 지원
+  if (window.__FX_OVERLAY_LOADED__) {
+    if (window.__FX_OVERLAY__?.reattach) window.__FX_OVERLAY__.reattach();
+    console.log("[FX] overlay.js already loaded -> reuse");
+    return;
+  }
+  window.__FX_OVERLAY_LOADED__ = true;
+  window.__FX_OVERLAY_BOOTED__ = false;
+  window.__FX_OVERLAY_ALIVE__ = false;
 
   const ID = "fx-overlay-canvas";
   const DPR_CAP = 2;
@@ -20,6 +33,10 @@
   // 옵션2: 인터랙티브 요소 위에서는 잉크 강도를 줄인다
   const FX_UI_ATTEN_INTERACTIVE = 0.35;
 
+  // (디버그/강제 가시화 옵션)
+  const DEBUG = !!window.__FX_DEBUG__;        // 콘솔에서 window.__FX_DEBUG__=true
+  const DEBUG_FORCE_SHOW = false;             // true면 zone/rect 없어도 잉크 보이게
+
   const INTERACTIVE_SELECTOR = [
     "a",
     "button",
@@ -31,10 +48,6 @@
     "[contenteditable='true']"
   ].join(",");
 
-  function dbg(...a) {
-    if (window.__FX_DEBUG__) console.log("[FX dbg]", ...a);
-  }
-
   // ----------------------------
   // 1) Canvas singleton
   // ----------------------------
@@ -44,10 +57,10 @@
       c = document.createElement("canvas");
       c.id = ID;
       document.body.appendChild(c);
-      console.log("[FX] canvas injected");
+      if (DEBUG) console.log("[FX] canvas injected");
     }
 
-    // CSS가 늦게 오거나 씹혀도 살아있게 "필수 스타일"만 강제
+    // 스타일 강제(혹시 CSS가 늦게 먹거나 덮이면 안전장치)
     c.style.position = "fixed";
     c.style.inset = "0";
     c.style.width = "100vw";
@@ -86,20 +99,16 @@
     t: performance.now(),
   };
 
-  function onPointerMoveLike(clientX, clientY) {
+  function onPointerMove(e) {
     const now = performance.now();
     const dt = Math.max(1, now - input.t);
-    const nx = clientX;
-    const ny = clientY;
+    const nx = e.clientX;
+    const ny = e.clientY;
     input.vx = (nx - input.x) / dt;
     input.vy = (ny - input.y) / dt;
     input.x = nx;
     input.y = ny;
     input.t = now;
-  }
-
-  function onPointerMove(e) {
-    onPointerMoveLike(e.clientX, e.clientY);
   }
   function onPointerDown() { input.down = true; }
   function onPointerUp() { input.down = false; }
@@ -129,6 +138,7 @@
   function ensureDefaultZoneIfNone() {
     if (fxZones.length > 0) return;
 
+    // Super/Notion/Next 공통 루트 후보들
     const root =
       document.querySelector(".super-content") ||
       document.querySelector(".notion-page-content") ||
@@ -138,7 +148,7 @@
     if (root) {
       root.setAttribute("data-fx-zone", "");
       fxZones = [root];
-      console.log("[FX] default zone applied:", root);
+      if (DEBUG) console.log("[FX] default zone applied:", root);
     } else {
       console.warn("[FX] no root found for default zone");
     }
@@ -176,6 +186,7 @@
       const pe = textNode.parentElement;
       if (!pe) continue;
 
+      // 부모가 화면 근처에 없으면 스킵
       const pr = pe.getBoundingClientRect();
       if (pr.bottom < 0 || pr.top > window.innerHeight) continue;
       if (pr.right < 0 || pr.left > window.innerWidth) continue;
@@ -205,7 +216,7 @@
     }
     rectCache = rects;
     lastRectRefreshAt = performance.now();
-    dbg("rects16=", rectCache.length, rectCache);
+    if (DEBUG) console.log("[FX dbg] rects16=", rectCache.length, rectCache.map(r => [r.x|0,r.y|0,r.w|0,r.h|0]));
   }
 
   function requestRectsRefresh() {
@@ -233,6 +244,7 @@
     const el = document.elementFromPoint(input.x, input.y);
     if (!el) return 1.0;
     const hit = el.closest?.(INTERACTIVE_SELECTOR);
+    if (DEBUG) console.log("[FX dbg] hover:", { mid: el.tagName, interactive: !!hit });
     return hit ? FX_UI_ATTEN_INTERACTIVE : 1.0;
   }
 
@@ -252,14 +264,19 @@
       if (!this.gl) throw new Error("WebGL2 not available");
 
       this.start = performance.now();
+
       this.progUpdate = null;
       this.progPresent = null;
+
       this.uUpdate = {};
       this.uPresent = {};
+
       this.fbo = [null, null];
       this.tex = [null, null];
       this.cur = 0;
+
       this.vao = null;
+
       this.W = 0;
       this.H = 0;
     }
@@ -360,7 +377,7 @@
           (gl_VertexID == 2) ? 3.0 : -1.0
         );
         vec2 uv = 0.5 * (p + 1.0);
-        vUv = vec2(uv.x, 1.0 - uv.y);
+        vUv = vec2(uv.x, 1.0 - uv.y); // top-left origin
         gl_Position = vec4(p, 0.0, 1.0);
       }`;
 
@@ -382,6 +399,7 @@
 
       uniform float uProxFar;
       uniform float uUiAtten;
+      uniform float uForceShow; // debug override
 
       vec4 blur9(sampler2D t, vec2 uv, vec2 px) {
         vec4 s = vec4(0.0);
@@ -442,10 +460,11 @@
         float grain = 0.02 * sin((vUv.x + vUv.y) * 160.0 + uTime * 3.0);
         deposit *= (1.0 + grain);
 
-        // if uRectCount==0, allow deposit (fallback)
-        float prox = (uRectCount > 0) ? mouseProximity(uMouse) : 1.0;
-        deposit *= prox;
+        float prox = 1.0;
+        if (uRectCount > 0) prox = mouseProximity(uMouse);
+        else prox = uForceShow; // rect 없으면 강제 0(기본) / debug면 1
 
+        deposit *= prox;
         deposit *= uUiAtten;
 
         ink.a = clamp(ink.a + deposit, 0.0, 1.0);
@@ -463,6 +482,7 @@
       uniform vec4 uRects[16];
       uniform float uFeather;
       uniform float uUiAtten;
+      uniform float uForceShow;
 
       float sdBox(vec2 p, vec2 a, vec2 b) {
         vec2 c = (a + b) * 0.5;
@@ -487,8 +507,10 @@
         vec4 ink = texture(uTex, vUv);
         float a = pow(clamp(ink.a, 0.0, 1.0), 1.35);
 
-        // if uRectCount==0, show ink (fallback)
-        float zone = (uRectCount > 0) ? inZones(vUv) : 1.0;
+        float zone = 1.0;
+        if (uRectCount > 0) zone = inZones(vUv);
+        else zone = uForceShow;
+
         a *= zone;
 
         float fiber = 0.02 * sin((vUv.x * 900.0) + (vUv.y * 700.0));
@@ -515,6 +537,7 @@
       this.uUpdate.uFeather = gl.getUniformLocation(this.progUpdate, "uFeather");
       this.uUpdate.uProxFar = gl.getUniformLocation(this.progUpdate, "uProxFar");
       this.uUpdate.uUiAtten = gl.getUniformLocation(this.progUpdate, "uUiAtten");
+      this.uUpdate.uForceShow = gl.getUniformLocation(this.progUpdate, "uForceShow");
 
       gl.useProgram(this.progPresent);
       this.uPresent.uTex = gl.getUniformLocation(this.progPresent, "uTex");
@@ -522,6 +545,7 @@
       this.uPresent.uRects = gl.getUniformLocation(this.progPresent, "uRects[0]");
       this.uPresent.uFeather = gl.getUniformLocation(this.progPresent, "uFeather");
       this.uPresent.uUiAtten = gl.getUniformLocation(this.progPresent, "uUiAtten");
+      this.uPresent.uForceShow = gl.getUniformLocation(this.progPresent, "uForceShow");
 
       this.vao = gl.createVertexArray();
       gl.bindVertexArray(this.vao);
@@ -542,9 +566,9 @@
       this._ensurePingPong(w, h);
 
       const rectsPx = getCachedTextRectsPx();
+
       const rectData = new Float32Array(FX_MAX_RECTS * 4);
       let rc = 0;
-
       for (const r of rectsPx) {
         const x0 = (r.x * dpr) / w;
         const y0 = (r.y * dpr) / h;
@@ -559,8 +583,10 @@
       }
 
       const t = (performance.now() - this.start) / 1000;
+
       const mx = (input.x * dpr) / w;
       const my = (input.y * dpr) / h;
+
       const velx = (input.vx * dpr) / w;
       const vely = (input.vy * dpr) / h;
 
@@ -570,8 +596,9 @@
       const prevIdx = this.cur;
       const nextIdx = 1 - this.cur;
 
-      // UPDATE
       gl.bindVertexArray(this.vao);
+
+      // PASS 1: UPDATE
       gl.useProgram(this.progUpdate);
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo[nextIdx]);
       gl.viewport(0, 0, w, h);
@@ -589,17 +616,20 @@
       gl.uniform1i(this.uUpdate.uRectCount, rc);
       gl.uniform4fv(this.uUpdate.uRects, rectData);
       gl.uniform1f(this.uUpdate.uFeather, (14 * dpr) / Math.min(w, h));
+
       gl.uniform1f(this.uUpdate.uProxFar, proxFarUv);
       gl.uniform1f(this.uUpdate.uUiAtten, uiAtten);
+      gl.uniform1f(this.uUpdate.uForceShow, DEBUG_FORCE_SHOW ? 1.0 : 0.0);
 
       gl.drawArrays(gl.TRIANGLES, 0, 3);
+
       this.cur = nextIdx;
 
-      // PRESENT
+      // PASS 2: PRESENT
+      gl.useProgram(this.progPresent);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, w, h);
 
-      gl.useProgram(this.progPresent);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.tex[this.cur]);
       gl.uniform1i(this.uPresent.uTex, 0);
@@ -607,14 +637,13 @@
       gl.uniform1i(this.uPresent.uRectCount, rc);
       gl.uniform4fv(this.uPresent.uRects, rectData);
       gl.uniform1f(this.uPresent.uFeather, (14 * dpr) / Math.min(w, h));
+
       gl.uniform1f(this.uPresent.uUiAtten, uiAtten);
+      gl.uniform1f(this.uPresent.uForceShow, DEBUG_FORCE_SHOW ? 1.0 : 0.0);
 
       gl.drawArrays(gl.TRIANGLES, 0, 3);
-      gl.bindVertexArray(null);
 
-      if (window.__FX_DEBUG__) {
-        dbg("input", {x:input.x,y:input.y,vx:input.vx,vy:input.vy,down:input.down}, "rc", rc);
-      }
+      gl.bindVertexArray(null);
     }
 
     destroy() {
@@ -644,6 +673,8 @@
   async function boot() {
     if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
 
+    window.__FX_OVERLAY_BOOTED__ = true;
+
     const canvas = ensureCanvas();
     const size = resizeCanvas(canvas);
 
@@ -661,40 +692,14 @@
       return;
     }
 
-    // ===== Event binding (SUPER hard mode) =====
-    const bindMove = (target) => {
-      if (!target || !target.addEventListener) return;
+    // Events
+    const onMove = (e) => { onPointerMove(e); requestRectsRefresh(); };
+    const onDown = () => { onPointerDown(); requestRectsRefresh(); };
+    const onUp = () => { onPointerUp(); };
 
-      target.addEventListener("pointermove", (e) => { onPointerMove(e); requestRectsRefresh(); }, { passive:true, capture:true });
-      target.addEventListener("mousemove",   (e) => { onPointerMove(e); requestRectsRefresh(); }, { passive:true, capture:true });
-
-      target.addEventListener("touchmove", (e) => {
-        const t = e.touches && e.touches[0];
-        if (!t) return;
-        onPointerMoveLike(t.clientX, t.clientY);
-        requestRectsRefresh();
-      }, { passive:true, capture:true });
-    };
-
-    const bindDownUp = (target) => {
-      if (!target || !target.addEventListener) return;
-
-      target.addEventListener("pointerdown", () => { onPointerDown(); requestRectsRefresh(); }, { passive:true, capture:true });
-      target.addEventListener("pointerup",   () => { onPointerUp(); }, { passive:true, capture:true });
-
-      target.addEventListener("mousedown", () => { onPointerDown(); requestRectsRefresh(); }, { passive:true, capture:true });
-      target.addEventListener("mouseup",   () => { onPointerUp(); }, { passive:true, capture:true });
-    };
-
-    bindMove(window);
-    bindMove(document);
-    bindMove(document.documentElement);
-    bindMove(document.body);
-
-    bindDownUp(window);
-    bindDownUp(document);
-    bindDownUp(document.documentElement);
-    bindDownUp(document.body);
+    window.addEventListener("pointermove", onMove, { passive: true });
+    window.addEventListener("pointerdown", onDown, { passive: true });
+    window.addEventListener("pointerup", onUp, { passive: true });
 
     window.addEventListener("resize", () => {
       const s = resizeCanvas(canvas);
@@ -716,10 +721,18 @@
     renderer.resize(size);
 
     let alive = true;
+    window.__FX_OVERLAY_ALIVE__ = true;
+
     const tick = () => {
       if (!alive) return;
 
-      if (!document.getElementById(ID)) document.body.appendChild(canvas);
+      // detach protection (Next/Super DOM 교체 대비)
+      const c = document.getElementById(ID);
+      if (!c) {
+        document.body.appendChild(canvas);
+      } else if (!c.parentNode) {
+        document.body.appendChild(c);
+      }
 
       const s = resizeCanvas(canvas);
       if (s.changed) {
@@ -735,12 +748,36 @@
     window.__FX_OVERLAY__ = {
       stop() {
         alive = false;
+        window.__FX_OVERLAY_ALIVE__ = false;
         mo.disconnect();
         renderer.destroy();
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerdown", onDown);
+        window.removeEventListener("pointerup", onUp);
+      },
+      reattach() {
+        const c = document.getElementById(ID);
+        if (!c) return;
+        if (!c.parentNode) document.body.appendChild(c);
+        c.style.display = "block";
+        c.style.pointerEvents = "none";
+        if (DEBUG) console.log("[FX] reattach done");
+      },
+      status() {
+        const c = document.getElementById(ID);
+        return {
+          loaded: !!window.__FX_OVERLAY_LOADED__,
+          booted: !!window.__FX_OVERLAY_BOOTED__,
+          alive: !!window.__FX_OVERLAY_ALIVE__,
+          hasCanvas: !!c,
+          zones: document.querySelectorAll(FX_ZONE_SELECTOR).length,
+          ctx: c?.getContext ? (c.getContext("webgl2") ? "webgl2" : "none") : "none",
+        };
       }
     };
   }
 
+  // DOM ready
   if (document.readyState === "complete" || document.readyState === "interactive") {
     boot();
   } else {
