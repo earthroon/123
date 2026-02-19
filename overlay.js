@@ -11,12 +11,19 @@
   const FX_RECTS_REFRESH_MS = 120;    // DOM/스크롤 갱신 디바운스
 
   // 근접도(옵션1): 마우스가 텍스트 라인에서 이 거리 이상 멀면 주입 0에 수렴
-  // 단위는 "화면의 짧은 변 기준 UV". (대략 60~120px 체감)
+  // 단위는 "화면의 짧은 변 기준 UV". (대략 px 체감)
   const FX_PROX_FAR_PX = 260;
 
-  // 옵션2: 인터랙티브 요소 위에서는 잉크 강도를 줄인다
-  // 0.35면 “있긴 한데 거의 티 안 남” 정도
-  const FX_UI_ATTEN_INTERACTIVE = 0.35;
+  // ✅ 클릭 없이도 잉크가 생기게 (핵심)
+  // 0..1 (높을수록 "항상 잉크가 살아있음")
+  const FX_AUTO_PRESS = 0.65;
+
+  // ✅ 인터랙티브 위에서 너무 죽지 않게 (핵심)
+  // 1.0=그대로, 0.75=살짝 줄임, 0.35=거의 티 안남
+  const FX_UI_ATTEN_INTERACTIVE = 0.75;
+
+  // ✅ 보이게(진단+운영 안전) : 최종 알파 강도
+  const FX_PRESENT_STRENGTH = 0.55;
 
   const INTERACTIVE_SELECTOR = [
     "a",
@@ -30,6 +37,30 @@
   ].join(",");
 
   // ----------------------------
+  // 0) CSS inject (캔버스가 “존재”만 하고 안 보이는 경우 방지)
+  // ----------------------------
+  function ensureStyle() {
+    const SID = "fx-overlay-style";
+    if (document.getElementById(SID)) return;
+    const s = document.createElement("style");
+    s.id = SID;
+    s.textContent = `
+#${ID}{
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 999999;
+  pointer-events: none;
+  display: block;
+}
+@media (prefers-reduced-motion: reduce){
+  #${ID}{ display:none !important; }
+}`;
+    document.head.appendChild(s);
+  }
+
+  // ----------------------------
   // 1) Canvas singleton
   // ----------------------------
   function ensureCanvas() {
@@ -38,7 +69,16 @@
       c = document.createElement("canvas");
       c.id = ID;
       document.body.appendChild(c);
+      console.log("[FX] canvas injected");
     }
+    // 혹시 스타일이 외부에서 덮여도, 최소한의 안전장치
+    c.style.pointerEvents = "none";
+    c.style.position = "fixed";
+    c.style.inset = "0";
+    c.style.zIndex = "999999";
+    c.style.display = "block";
+    c.style.width = "100vw";
+    c.style.height = "100vh";
     return c;
   }
 
@@ -104,23 +144,24 @@
   function refreshFxZones() {
     fxZones = Array.from(document.querySelectorAll(FX_ZONE_SELECTOR));
   }
-function ensureDefaultZoneIfNone() {
-  if (fxZones.length > 0) return;
 
-  const root =
-    document.querySelector(".super-content") ||
-    document.querySelector(".notion-page-content") ||
-    document.querySelector("main") ||
-    document.body;
+  function ensureDefaultZoneIfNone() {
+    if (fxZones.length > 0) return;
 
-  if (root) {
-    root.setAttribute("data-fx-zone", "");
-    fxZones = [root];
-    console.log("[FX] default zone applied:", root);
-  } else {
-    console.warn("[FX] no root found for default zone");
+    const root =
+      document.querySelector(".super-content") ||
+      document.querySelector(".notion-page-content") ||
+      document.querySelector("main") ||
+      document.body;
+
+    if (root) {
+      root.setAttribute("data-fx-zone", "");
+      fxZones = [root];
+      console.log("[FX] default zone applied:", root);
+    } else {
+      console.warn("[FX] no root found for default zone");
+    }
   }
-}
 
   function isElementVisible(el) {
     const r = el.getBoundingClientRect();
@@ -154,14 +195,13 @@ function ensureDefaultZoneIfNone() {
       const pe = textNode.parentElement;
       if (!pe) continue;
 
-      // 부모가 화면 근처에 없으면 스킵
       const pr = pe.getBoundingClientRect();
       if (pr.bottom < 0 || pr.top > window.innerHeight) continue;
       if (pr.right < 0 || pr.left > window.innerWidth) continue;
 
       range.selectNodeContents(textNode);
-
       const rects = range.getClientRects();
+
       for (let i = 0; i < rects.length; i++) {
         const r = rects[i];
         if (r.width < FX_MIN_RECT_W || r.height < FX_MIN_RECT_H) continue;
@@ -211,8 +251,6 @@ function ensureDefaultZoneIfNone() {
     // 캔버스는 pointer-events:none이라 elementFromPoint가 실제 DOM을 반환함
     const el = document.elementFromPoint(input.x, input.y);
     if (!el) return 1.0;
-
-    // closest로 상위까지 인터랙티브 체크
     const hit = el.closest?.(INTERACTIVE_SELECTOR);
     return hit ? FX_UI_ATTEN_INTERACTIVE : 1.0;
   }
@@ -339,178 +377,166 @@ function ensureDefaultZoneIfNone() {
 
       // vUv: top-left origin (0,0) like DOM
       const vs = `#version 300 es
-      precision highp float;
-      out vec2 vUv;
-      void main() {
-        vec2 p = vec2(
-          (gl_VertexID == 1) ? 3.0 : -1.0,
-          (gl_VertexID == 2) ? 3.0 : -1.0
-        );
-        vec2 uv = 0.5 * (p + 1.0);
-        vUv = vec2(uv.x, 1.0 - uv.y);
-        gl_Position = vec4(p, 0.0, 1.0);
-      }`;
+precision highp float;
+out vec2 vUv;
+void main() {
+  vec2 p = vec2(
+    (gl_VertexID == 1) ? 3.0 : -1.0,
+    (gl_VertexID == 2) ? 3.0 : -1.0
+  );
+  vec2 uv = 0.5 * (p + 1.0);
+  vUv = vec2(uv.x, 1.0 - uv.y);
+  gl_Position = vec4(p, 0.0, 1.0);
+}`;
 
       const fsUpdate = `#version 300 es
-      precision highp float;
-      in vec2 vUv;
-      out vec4 o;
+precision highp float;
+in vec2 vUv;
+out vec4 o;
 
-      uniform sampler2D uPrev;
-      uniform vec2 uRes;        // pixel res
-      uniform vec2 uMouse;      // uv (top-left origin)
-      uniform vec2 uVel;        // uv velocity
-      uniform float uDown;      // 0/1
-      uniform float uTime;      // seconds
+uniform sampler2D uPrev;
+uniform vec2 uRes;        // pixel res
+uniform vec2 uMouse;      // uv (top-left origin)
+uniform vec2 uVel;        // uv velocity
+uniform float uDown;      // 0/1
+uniform float uTime;      // seconds
 
-      uniform int uRectCount;
-      uniform vec4 uRects[16];  // (x0,y0,x1,y1) in uv, top-left origin
-      uniform float uFeather;   // uv feather for mask edge
+uniform int uRectCount;
+uniform vec4 uRects[16];  // (x0,y0,x1,y1) in uv, top-left origin
+uniform float uFeather;   // uv feather for mask edge
 
-      uniform float uProxFar;   // uv distance where proximity -> 0
-      uniform float uUiAtten;   // 0..1
+uniform float uProxFar;   // uv distance where proximity -> 0
+uniform float uUiAtten;   // 0..1
 
-      vec4 blur9(sampler2D t, vec2 uv, vec2 px) {
-        vec4 s = vec4(0.0);
-        s += texture(t, uv + px * vec2(-1.0,-1.0)) * 0.06;
-        s += texture(t, uv + px * vec2( 0.0,-1.0)) * 0.10;
-        s += texture(t, uv + px * vec2( 1.0,-1.0)) * 0.06;
-        s += texture(t, uv + px * vec2(-1.0, 0.0)) * 0.10;
-        s += texture(t, uv + px * vec2( 0.0, 0.0)) * 0.36;
-        s += texture(t, uv + px * vec2( 1.0, 0.0)) * 0.10;
-        s += texture(t, uv + px * vec2(-1.0, 1.0)) * 0.06;
-        s += texture(t, uv + px * vec2( 0.0, 1.0)) * 0.10;
-        s += texture(t, uv + px * vec2( 1.0, 1.0)) * 0.06;
-        return s;
-      }
+uniform float uAutoPress; // ✅ click 없이 주입 유지
 
-      float sdBox(vec2 p, vec2 a, vec2 b) {
-        vec2 c = (a + b) * 0.5;
-        vec2 e = (b - a) * 0.5;
-        vec2 d = abs(p - c) - e;
-        return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
-      }
+vec4 blur9(sampler2D t, vec2 uv, vec2 px) {
+  vec4 s = vec4(0.0);
+  s += texture(t, uv + px * vec2(-1.0,-1.0)) * 0.06;
+  s += texture(t, uv + px * vec2( 0.0,-1.0)) * 0.10;
+  s += texture(t, uv + px * vec2( 1.0,-1.0)) * 0.06;
+  s += texture(t, uv + px * vec2(-1.0, 0.0)) * 0.10;
+  s += texture(t, uv + px * vec2( 0.0, 0.0)) * 0.36;
+  s += texture(t, uv + px * vec2( 1.0, 0.0)) * 0.10;
+  s += texture(t, uv + px * vec2(-1.0, 1.0)) * 0.06;
+  s += texture(t, uv + px * vec2( 0.0, 1.0)) * 0.10;
+  s += texture(t, uv + px * vec2( 1.0, 1.0)) * 0.06;
+  return s;
+}
 
-      float inZones(vec2 uv) {
-        float m = 0.0;
-        for (int i = 0; i < 16; i++) {
-          if (i >= uRectCount) break;
-          vec4 r = uRects[i];
-          float d = sdBox(uv, r.xy, r.zw);
-          float inside = 1.0 - smoothstep(0.0, uFeather, d);
-          m = max(m, inside);
-        }
-        return m;
-      }
+float sdBox(vec2 p, vec2 a, vec2 b) {
+  vec2 c = (a + b) * 0.5;
+  vec2 e = (b - a) * 0.5;
+  vec2 d = abs(p - c) - e;
+  return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+}
 
-      float mouseProximity(vec2 mUv) {
-        // 마우스가 텍스트 라인에 가까울수록 1, 멀수록 0
-        // (inside면 d<=0 이라 1에 붙음)
-        float dmin = 1e6;
-        for (int i = 0; i < 16; i++) {
-          if (i >= uRectCount) break;
-          vec4 r = uRects[i];
-          float d = sdBox(mUv, r.xy, r.zw);
-          dmin = min(dmin, max(d, 0.0)); // 밖에서만 거리로
-        }
-        // dmin=0이면 1, dmin>=uProxFar면 0
-        return 1.0 - smoothstep(0.0, uProxFar, dmin);
-      }
+float mouseProximity(vec2 mUv) {
+  float dmin = 1e6;
+  for (int i = 0; i < 16; i++) {
+    if (i >= uRectCount) break;
+    vec4 r = uRects[i];
+    float d = sdBox(mUv, r.xy, r.zw);
+    dmin = min(dmin, max(d, 0.0));
+  }
+  return 1.0 - smoothstep(0.0, uProxFar, dmin);
+}
 
-      float soft(vec2 p, vec2 c, float r, float blur) {
-        float d = length(p - c);
-        return 1.0 - smoothstep(r, r + blur, d);
-      }
+float soft(vec2 p, vec2 c, float r, float blur) {
+  float d = length(p - c);
+  return 1.0 - smoothstep(r, r + blur, d);
+}
 
-      void main() {
-        vec2 px = 1.0 / uRes;
+void main() {
+  vec2 px = 1.0 / uRes;
 
-        // Advection: gently pull ink along motion
-        vec2 adv = -uVel * 0.6;
-        vec4 prev = texture(uPrev, vUv + adv);
-        vec4 diff = blur9(uPrev, vUv + adv, px);
+  // Advection: gently pull ink along motion
+  vec2 adv = -uVel * 0.6;
+  vec4 prev = texture(uPrev, vUv + adv);
+  vec4 diff = blur9(uPrev, vUv + adv, px);
 
-        // Decay
-        float decay = 0.985;
-        vec4 ink = mix(prev, diff, 0.65) * decay;
+  // Decay
+  float decay = 0.985;
+  vec4 ink = mix(prev, diff, 0.65) * decay;
 
-        // Injection near mouse
-        float press = uDown;
-        float speed = clamp(length(uVel) * 120.0, 0.0, 1.0);
+  // Injection near mouse
+  float press = max(uDown, uAutoPress); // ✅ 클릭 없이도 press 유지
+  float speed = clamp(length(uVel) * 120.0, 0.0, 1.0);
 
-        float r = mix(0.018, 0.032, speed) + press * 0.020;
-        float a = soft(vUv, uMouse, r, r * 1.8);
-        float core = soft(vUv, uMouse, r * 0.45, r * 0.8);
+  float r = mix(0.018, 0.032, speed) + press * 0.020;
+  float a = soft(vUv, uMouse, r, r * 1.8);
+  float core = soft(vUv, uMouse, r * 0.45, r * 0.8);
 
-        float deposit = (0.35 + 0.65 * press) * a + (0.20 + 0.60 * press) * core;
+  float deposit = (0.35 + 0.65 * press) * a + (0.20 + 0.60 * press) * core;
 
-        // Grain
-        float grain = 0.02 * sin((vUv.x + vUv.y) * 160.0 + uTime * 3.0);
-        deposit *= (1.0 + grain);
+  // Grain
+  float grain = 0.02 * sin((vUv.x + vUv.y) * 160.0 + uTime * 3.0);
+  deposit *= (1.0 + grain);
 
-        // Option1: proximity gate (computed at mouse vs rects)
-        float prox = (uRectCount > 0) ? mouseProximity(uMouse) : 0.0;
-        deposit *= prox;
+  // Option1: proximity gate
+  float prox = (uRectCount > 0) ? mouseProximity(uMouse) : 1.0;
+  deposit *= prox;
 
-        // Option2: interactive atten
-        deposit *= uUiAtten;
+  // Option2: interactive atten
+  deposit *= uUiAtten;
 
-        // Store only density in alpha
-        ink.a = clamp(ink.a + deposit, 0.0, 1.0);
-        o = vec4(0.0, 0.0, 0.0, ink.a);
-      }`;
+  // Store only density in alpha
+  ink.a = clamp(ink.a + deposit, 0.0, 1.0);
+  o = vec4(0.0, 0.0, 0.0, ink.a);
+}`;
 
       const fsPresent = `#version 300 es
-      precision highp float;
-      in vec2 vUv;
-      out vec4 o;
+precision highp float;
+in vec2 vUv;
+out vec4 o;
 
-      uniform sampler2D uTex;
+uniform sampler2D uTex;
 
-      uniform int uRectCount;
-      uniform vec4 uRects[16];
-      uniform float uFeather;
-      uniform float uUiAtten;
+uniform int uRectCount;
+uniform vec4 uRects[16];
+uniform float uFeather;
+uniform float uUiAtten;
 
-      float sdBox(vec2 p, vec2 a, vec2 b) {
-        vec2 c = (a + b) * 0.5;
-        vec2 e = (b - a) * 0.5;
-        vec2 d = abs(p - c) - e;
-        return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
-      }
+uniform float uStrength; // ✅ 최종 알파 강도
 
-      float inZones(vec2 uv) {
-        float m = 0.0;
-        for (int i = 0; i < 16; i++) {
-          if (i >= uRectCount) break;
-          vec4 r = uRects[i];
-          float d = sdBox(uv, r.xy, r.zw);
-          float inside = 1.0 - smoothstep(0.0, uFeather, d);
-          m = max(m, inside);
-        }
-        return m;
-      }
+float sdBox(vec2 p, vec2 a, vec2 b) {
+  vec2 c = (a + b) * 0.5;
+  vec2 e = (b - a) * 0.5;
+  vec2 d = abs(p - c) - e;
+  return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
+}
 
-      void main() {
-        vec4 ink = texture(uTex, vUv);
+float inZones(vec2 uv) {
+  float m = 0.0;
+  for (int i = 0; i < 16; i++) {
+    if (i >= uRectCount) break;
+    vec4 r = uRects[i];
+    float d = sdBox(uv, r.xy, r.zw);
+    float inside = 1.0 - smoothstep(0.0, uFeather, d);
+    m = max(m, inside);
+  }
+  return m;
+}
 
-        // Density curve: keep it classy
-        float a = pow(clamp(ink.a, 0.0, 1.0), 1.35);
+void main() {
+  vec4 ink = texture(uTex, vUv);
 
-        // Text-line mask (still required so old ink never shows outside)
-        float zone = (uRectCount > 0) ? inZones(vUv) : 0.0;
-        a *= zone;
+  // ✅ 더 쉽게 살아남는 커브(보이게)
+  float a = pow(clamp(ink.a, 0.0, 1.0), 0.85);
 
-        // Subtle paper fiber
-        float fiber = 0.02 * sin((vUv.x * 900.0) + (vUv.y * 700.0));
-        a *= (1.0 + fiber);
+  // Text-line mask
+  float zone = (uRectCount > 0) ? inZones(vUv) : 1.0;
+  a *= zone;
 
-        // Option2: interactive atten also dims the visible ink
-        a *= uUiAtten;
+  // Subtle paper fiber
+  float fiber = 0.02 * sin((vUv.x * 900.0) + (vUv.y * 700.0));
+  a *= (1.0 + fiber);
 
-        float strength = 0.32;
-        o = vec4(0.0, 0.0, 0.0, a * strength);
-      }`;
+  // interactive atten also dims visible ink
+  a *= uUiAtten;
+
+  o = vec4(0.0, 0.0, 0.0, a * uStrength);
+}`;
 
       this.progUpdate = this._link(vs, fsUpdate);
       this.progPresent = this._link(vs, fsPresent);
@@ -528,6 +554,7 @@ function ensureDefaultZoneIfNone() {
       this.uUpdate.uFeather = gl.getUniformLocation(this.progUpdate, "uFeather");
       this.uUpdate.uProxFar = gl.getUniformLocation(this.progUpdate, "uProxFar");
       this.uUpdate.uUiAtten = gl.getUniformLocation(this.progUpdate, "uUiAtten");
+      this.uUpdate.uAutoPress = gl.getUniformLocation(this.progUpdate, "uAutoPress");
 
       // present uniforms
       gl.useProgram(this.progPresent);
@@ -536,6 +563,7 @@ function ensureDefaultZoneIfNone() {
       this.uPresent.uRects = gl.getUniformLocation(this.progPresent, "uRects[0]");
       this.uPresent.uFeather = gl.getUniformLocation(this.progPresent, "uFeather");
       this.uPresent.uUiAtten = gl.getUniformLocation(this.progPresent, "uUiAtten");
+      this.uPresent.uStrength = gl.getUniformLocation(this.progPresent, "uStrength");
 
       // VAO
       this.vao = gl.createVertexArray();
@@ -616,6 +644,7 @@ function ensureDefaultZoneIfNone() {
 
       gl.uniform1f(this.uUpdate.uProxFar, proxFarUv);
       gl.uniform1f(this.uUpdate.uUiAtten, uiAtten);
+      gl.uniform1f(this.uUpdate.uAutoPress, FX_AUTO_PRESS);
 
       gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -635,6 +664,7 @@ function ensureDefaultZoneIfNone() {
       gl.uniform1f(this.uPresent.uFeather, (14 * dpr) / Math.min(w, h));
 
       gl.uniform1f(this.uPresent.uUiAtten, uiAtten);
+      gl.uniform1f(this.uPresent.uStrength, FX_PRESENT_STRENGTH);
 
       gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -666,8 +696,18 @@ function ensureDefaultZoneIfNone() {
   // 8) Boot
   // ----------------------------
   async function boot() {
-    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      console.log("[FX] reduced motion detected, FX disabled");
+      return;
+    }
 
+    // ✅ head/body 준비될 때까지 보장
+    if (!document.head || !document.body) {
+      requestAnimationFrame(boot);
+      return;
+    }
+
+    ensureStyle();
     const canvas = ensureCanvas();
     const size = resizeCanvas(canvas);
 
@@ -679,7 +719,7 @@ function ensureDefaultZoneIfNone() {
     try {
       renderer = new WebGL2Renderer(canvas);
       await renderer.init();
-      console.log("[FX] WebGL2 ink enabled (text-line masked + proximity + UI atten)");
+      console.log("[FX] WebGL2 ink enabled (autoPress + masked + proximity + UI atten)");
     } catch (e) {
       console.warn("[FX] WebGL2 failed. FX disabled:", e?.message || e);
       return;
@@ -688,7 +728,6 @@ function ensureDefaultZoneIfNone() {
     // Events
     window.addEventListener("pointermove", (e) => {
       onPointerMove(e);
-      // 근접도 기반이라 포인터 움직이면 rect 갱신이 가끔 필요(특히 스크롤/리렌더 직후)
       requestRectsRefresh();
     }, { passive: true });
 
@@ -709,11 +748,11 @@ function ensureDefaultZoneIfNone() {
       requestRectsRefresh();
     }, { passive: true });
 
-   const mo = new MutationObserver(() => {
-  refreshFxZones();
-  ensureDefaultZoneIfNone(); // ✅ 추가
-  requestRectsRefresh();
-});
+    const mo = new MutationObserver(() => {
+      refreshFxZones();
+      ensureDefaultZoneIfNone();
+      requestRectsRefresh();
+    });
     mo.observe(document.body, { childList: true, subtree: true, attributes: true });
 
     renderer.resize(size);
@@ -741,7 +780,11 @@ function ensureDefaultZoneIfNone() {
         alive = false;
         mo.disconnect();
         renderer.destroy();
-        window.removeEventListener("pointerup", onPointerUp);
+        console.log("[FX] stopped");
+      },
+      dbgRects() {
+        console.log("[FX dbg] rectCache len =", rectCache.length, rectCache);
+        return rectCache;
       }
     };
   }
