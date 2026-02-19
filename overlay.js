@@ -1,21 +1,4 @@
 (() => {
-  "use strict";
-
-  // =========================
-  // FX Overlay SSOT Guard (Super/Next safe)
-  // =========================
-  // - 중복 로드 방지
-  // - booted/alive SSOT 플래그 봉인
-  // - DOM 갈아엎힘(Next/Super) 상황에서 reattach 지원
-  if (window.__FX_OVERLAY_LOADED__) {
-    if (window.__FX_OVERLAY__?.reattach) window.__FX_OVERLAY__.reattach();
-    console.log("[FX] overlay.js already loaded -> reuse");
-    return;
-  }
-  window.__FX_OVERLAY_LOADED__ = true;
-  window.__FX_OVERLAY_BOOTED__ = false;
-  window.__FX_OVERLAY_ALIVE__ = false;
-
   const ID = "fx-overlay-canvas";
   const DPR_CAP = 2;
 
@@ -33,20 +16,63 @@
   // 옵션2: 인터랙티브 요소 위에서는 잉크 강도를 줄인다
   const FX_UI_ATTEN_INTERACTIVE = 0.35;
 
-  // (디버그/강제 가시화 옵션)
-  const DEBUG = !!window.__FX_DEBUG__;        // 콘솔에서 window.__FX_DEBUG__=true
-  const DEBUG_FORCE_SHOW = false;             // true면 zone/rect 없어도 잉크 보이게
+  // === Debug / Safety switches ===
+  const FX_DEBUG = true;              // true면 우하단 HUD 표시
+  const FX_FORCE_DEPOSIT = false;     // true면 "근접도/zone" 무시하고 주입(디버그용)
+  const FX_FORCE_PRESENT = false;     // true면 마스크 무시하고 출력(디버그용)
 
   const INTERACTIVE_SELECTOR = [
-    "a",
-    "button",
-    "input",
-    "textarea",
-    "select",
-    "[role='button']",
-    "[role='link']",
-    "[contenteditable='true']"
+    "a","button","input","textarea","select",
+    "[role='button']","[role='link']","[contenteditable='true']"
   ].join(",");
+
+  // ----------------------------
+  // 0) Global marker + status shell (중간즉사 방지)
+  // ----------------------------
+  window.__FX_OVERLAY_LOADED__ = true;
+
+  // stop/status가 항상 존재하도록 “먼저” 박아둔다 (에러 나도 상태 확인 가능)
+  const __state = {
+    version: "inkfix6",
+    loadedAt: Date.now(),
+    booted: false,
+    hasGL: false,
+    lastErr: null,
+    zones: 0,
+    rectCount: 0,
+    inputSeen: 0,
+    lastDown: false,
+    lastMouse: [0, 0],
+    lastSampleA: null,
+  };
+
+  // 이미 살아있으면 중복 부팅 방지
+  if (window.__FX_OVERLAY__ && window.__FX_OVERLAY__.stop) {
+    try { window.__FX_OVERLAY__.stop(); } catch(_) {}
+  }
+
+  // debug badge
+  function ensureDebugBadge() {
+    let d = document.getElementById("fx-debug-badge");
+    if (!d) {
+      d = document.createElement("div");
+      d.id = "fx-debug-badge";
+      document.body.appendChild(d);
+    }
+    if (FX_DEBUG) d.classList.add("on");
+    return d;
+  }
+
+  function setBadge(text) {
+    if (!FX_DEBUG) return;
+    const d = ensureDebugBadge();
+    d.textContent = text;
+  }
+
+  window.__FX_OVERLAY__ = {
+    stop: () => {},
+    status: () => ({ ...__state })
+  };
 
   // ----------------------------
   // 1) Canvas singleton
@@ -57,18 +83,7 @@
       c = document.createElement("canvas");
       c.id = ID;
       document.body.appendChild(c);
-      if (DEBUG) console.log("[FX] canvas injected");
     }
-
-    // 스타일 강제(혹시 CSS가 늦게 먹거나 덮이면 안전장치)
-    c.style.position = "fixed";
-    c.style.inset = "0";
-    c.style.width = "100vw";
-    c.style.height = "100vh";
-    c.style.zIndex = "999999";
-    c.style.pointerEvents = "none";
-    c.style.display = "block";
-
     return c;
   }
 
@@ -100,6 +115,7 @@
   };
 
   function onPointerMove(e) {
+    __state.inputSeen++;
     const now = performance.now();
     const dt = Math.max(1, now - input.t);
     const nx = e.clientX;
@@ -109,9 +125,15 @@
     input.x = nx;
     input.y = ny;
     input.t = now;
+    __state.lastMouse = [nx, ny];
   }
-  function onPointerDown() { input.down = true; }
-  function onPointerUp() { input.down = false; }
+  function onPointerDown() { input.down = true; __state.lastDown = true; }
+  function onPointerUp() { input.down = false; __state.lastDown = false; }
+
+  // iOS/Super에서 pointer가 이상하면 mouse로도 받자
+  function onMouseMove(e){ onPointerMove(e); }
+  function onMouseDown(){ onPointerDown(); }
+  function onMouseUp(){ onPointerUp(); }
 
   // ----------------------------
   // 4) Renderer interface
@@ -133,12 +155,12 @@
 
   function refreshFxZones() {
     fxZones = Array.from(document.querySelectorAll(FX_ZONE_SELECTOR));
+    __state.zones = fxZones.length;
   }
 
   function ensureDefaultZoneIfNone() {
     if (fxZones.length > 0) return;
 
-    // Super/Notion/Next 공통 루트 후보들
     const root =
       document.querySelector(".super-content") ||
       document.querySelector(".notion-page-content") ||
@@ -148,7 +170,8 @@
     if (root) {
       root.setAttribute("data-fx-zone", "");
       fxZones = [root];
-      if (DEBUG) console.log("[FX] default zone applied:", root);
+      __state.zones = 1;
+      console.log("[FX] default zone applied:", root);
     } else {
       console.warn("[FX] no root found for default zone");
     }
@@ -186,7 +209,6 @@
       const pe = textNode.parentElement;
       if (!pe) continue;
 
-      // 부모가 화면 근처에 없으면 스킵
       const pr = pe.getBoundingClientRect();
       if (pr.bottom < 0 || pr.top > window.innerHeight) continue;
       if (pr.right < 0 || pr.left > window.innerWidth) continue;
@@ -215,8 +237,8 @@
       if (rects.length >= FX_MAX_RECTS) break;
     }
     rectCache = rects;
+    __state.rectCount = rects.length;
     lastRectRefreshAt = performance.now();
-    if (DEBUG) console.log("[FX dbg] rects16=", rectCache.length, rectCache.map(r => [r.x|0,r.y|0,r.w|0,r.h|0]));
   }
 
   function requestRectsRefresh() {
@@ -244,7 +266,6 @@
     const el = document.elementFromPoint(input.x, input.y);
     if (!el) return 1.0;
     const hit = el.closest?.(INTERACTIVE_SELECTOR);
-    if (DEBUG) console.log("[FX dbg] hover:", { mid: el.tagName, interactive: !!hit });
     return hit ? FX_UI_ATTEN_INTERACTIVE : 1.0;
   }
 
@@ -263,11 +284,12 @@
       });
       if (!this.gl) throw new Error("WebGL2 not available");
 
+      __state.hasGL = true;
+
       this.start = performance.now();
 
       this.progUpdate = null;
       this.progPresent = null;
-
       this.uUpdate = {};
       this.uPresent = {};
 
@@ -276,7 +298,6 @@
       this.cur = 0;
 
       this.vao = null;
-
       this.W = 0;
       this.H = 0;
     }
@@ -377,7 +398,7 @@
           (gl_VertexID == 2) ? 3.0 : -1.0
         );
         vec2 uv = 0.5 * (p + 1.0);
-        vUv = vec2(uv.x, 1.0 - uv.y); // top-left origin
+        vUv = vec2(uv.x, 1.0 - uv.y);
         gl_Position = vec4(p, 0.0, 1.0);
       }`;
 
@@ -399,7 +420,8 @@
 
       uniform float uProxFar;
       uniform float uUiAtten;
-      uniform float uForceShow; // debug override
+
+      uniform float uForceDeposit; // 0/1
 
       vec4 blur9(sampler2D t, vec2 uv, vec2 px) {
         vec4 s = vec4(0.0);
@@ -460,11 +482,9 @@
         float grain = 0.02 * sin((vUv.x + vUv.y) * 160.0 + uTime * 3.0);
         deposit *= (1.0 + grain);
 
-        float prox = 1.0;
-        if (uRectCount > 0) prox = mouseProximity(uMouse);
-        else prox = uForceShow; // rect 없으면 강제 0(기본) / debug면 1
+        float prox = (uRectCount > 0) ? mouseProximity(uMouse) : 1.0;
+        deposit *= mix(prox, 1.0, uForceDeposit);
 
-        deposit *= prox;
         deposit *= uUiAtten;
 
         ink.a = clamp(ink.a + deposit, 0.0, 1.0);
@@ -482,7 +502,8 @@
       uniform vec4 uRects[16];
       uniform float uFeather;
       uniform float uUiAtten;
-      uniform float uForceShow;
+
+      uniform float uForcePresent; // 0/1
 
       float sdBox(vec2 p, vec2 a, vec2 b) {
         vec2 c = (a + b) * 0.5;
@@ -507,10 +528,8 @@
         vec4 ink = texture(uTex, vUv);
         float a = pow(clamp(ink.a, 0.0, 1.0), 1.35);
 
-        float zone = 1.0;
-        if (uRectCount > 0) zone = inZones(vUv);
-        else zone = uForceShow;
-
+        float zone = (uRectCount > 0) ? inZones(vUv) : 1.0;
+        zone = mix(zone, 1.0, uForcePresent);
         a *= zone;
 
         float fiber = 0.02 * sin((vUv.x * 900.0) + (vUv.y * 700.0));
@@ -537,7 +556,7 @@
       this.uUpdate.uFeather = gl.getUniformLocation(this.progUpdate, "uFeather");
       this.uUpdate.uProxFar = gl.getUniformLocation(this.progUpdate, "uProxFar");
       this.uUpdate.uUiAtten = gl.getUniformLocation(this.progUpdate, "uUiAtten");
-      this.uUpdate.uForceShow = gl.getUniformLocation(this.progUpdate, "uForceShow");
+      this.uUpdate.uForceDeposit = gl.getUniformLocation(this.progUpdate, "uForceDeposit");
 
       gl.useProgram(this.progPresent);
       this.uPresent.uTex = gl.getUniformLocation(this.progPresent, "uTex");
@@ -545,7 +564,7 @@
       this.uPresent.uRects = gl.getUniformLocation(this.progPresent, "uRects[0]");
       this.uPresent.uFeather = gl.getUniformLocation(this.progPresent, "uFeather");
       this.uPresent.uUiAtten = gl.getUniformLocation(this.progPresent, "uUiAtten");
-      this.uPresent.uForceShow = gl.getUniformLocation(this.progPresent, "uForceShow");
+      this.uPresent.uForcePresent = gl.getUniformLocation(this.progPresent, "uForcePresent");
 
       this.vao = gl.createVertexArray();
       gl.bindVertexArray(this.vao);
@@ -566,9 +585,9 @@
       this._ensurePingPong(w, h);
 
       const rectsPx = getCachedTextRectsPx();
-
       const rectData = new Float32Array(FX_MAX_RECTS * 4);
       let rc = 0;
+
       for (const r of rectsPx) {
         const x0 = (r.x * dpr) / w;
         const y0 = (r.y * dpr) / h;
@@ -581,6 +600,7 @@
         rc++;
         if (rc >= FX_MAX_RECTS) break;
       }
+      __state.rectCount = rc;
 
       const t = (performance.now() - this.start) / 1000;
 
@@ -596,10 +616,10 @@
       const prevIdx = this.cur;
       const nextIdx = 1 - this.cur;
 
+      // UPDATE
       gl.bindVertexArray(this.vao);
-
-      // PASS 1: UPDATE
       gl.useProgram(this.progUpdate);
+
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo[nextIdx]);
       gl.viewport(0, 0, w, h);
 
@@ -619,17 +639,17 @@
 
       gl.uniform1f(this.uUpdate.uProxFar, proxFarUv);
       gl.uniform1f(this.uUpdate.uUiAtten, uiAtten);
-      gl.uniform1f(this.uUpdate.uForceShow, DEBUG_FORCE_SHOW ? 1.0 : 0.0);
+
+      gl.uniform1f(this.uUpdate.uForceDeposit, FX_FORCE_DEPOSIT ? 1 : 0);
 
       gl.drawArrays(gl.TRIANGLES, 0, 3);
-
       this.cur = nextIdx;
 
-      // PASS 2: PRESENT
-      gl.useProgram(this.progPresent);
+      // PRESENT
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, w, h);
 
+      gl.useProgram(this.progPresent);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.tex[this.cur]);
       gl.uniform1i(this.uPresent.uTex, 0);
@@ -637,13 +657,26 @@
       gl.uniform1i(this.uPresent.uRectCount, rc);
       gl.uniform4fv(this.uPresent.uRects, rectData);
       gl.uniform1f(this.uPresent.uFeather, (14 * dpr) / Math.min(w, h));
-
       gl.uniform1f(this.uPresent.uUiAtten, uiAtten);
-      gl.uniform1f(this.uPresent.uForceShow, DEBUG_FORCE_SHOW ? 1.0 : 0.0);
+
+      gl.uniform1f(this.uPresent.uForcePresent, FX_FORCE_PRESENT ? 1 : 0);
 
       gl.drawArrays(gl.TRIANGLES, 0, 3);
 
       gl.bindVertexArray(null);
+
+      // HUD
+      setBadge(
+        `FX ${__state.version}\n` +
+        `booted: ${__state.booted}\n` +
+        `zones: ${__state.zones}\n` +
+        `rects: ${__state.rectCount}\n` +
+        `inputSeen: ${__state.inputSeen}\n` +
+        `down: ${__state.lastDown}\n` +
+        `mouse: ${Math.round(__state.lastMouse[0])},${Math.round(__state.lastMouse[1])}\n` +
+        `uiAtten: ${uiAtten.toFixed(2)}\n` +
+        `err: ${__state.lastErr ? String(__state.lastErr).slice(0,60) : "-"}`
+      );
     }
 
     destroy() {
@@ -671,113 +704,106 @@
   // 8) Boot
   // ----------------------------
   async function boot() {
-    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-
-    window.__FX_OVERLAY_BOOTED__ = true;
-
-    const canvas = ensureCanvas();
-    const size = resizeCanvas(canvas);
-
-    refreshFxZones();
-    ensureDefaultZoneIfNone();
-    requestRectsRefresh();
-
-    let renderer = null;
     try {
-      renderer = new WebGL2Renderer(canvas);
-      await renderer.init();
-      console.log("[FX] WebGL2 ink enabled (text-line masked + proximity + UI atten)");
-    } catch (e) {
-      console.warn("[FX] WebGL2 failed. FX disabled:", e?.message || e);
-      return;
-    }
+      if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
 
-    // Events
-    const onMove = (e) => { onPointerMove(e); requestRectsRefresh(); };
-    const onDown = () => { onPointerDown(); requestRectsRefresh(); };
-    const onUp = () => { onPointerUp(); };
+      const canvas = ensureCanvas();
+      const size = resizeCanvas(canvas);
 
-    window.addEventListener("pointermove", onMove, { passive: true });
-    window.addEventListener("pointerdown", onDown, { passive: true });
-    window.addEventListener("pointerup", onUp, { passive: true });
-
-    window.addEventListener("resize", () => {
-      const s = resizeCanvas(canvas);
-      renderer.resize(s);
-      requestRectsRefresh();
-    }, { passive: true });
-
-    window.addEventListener("scroll", () => {
-      requestRectsRefresh();
-    }, { passive: true });
-
-    const mo = new MutationObserver(() => {
       refreshFxZones();
       ensureDefaultZoneIfNone();
       requestRectsRefresh();
-    });
-    mo.observe(document.body, { childList: true, subtree: true, attributes: true });
 
-    renderer.resize(size);
+      let renderer;
+      renderer = new WebGL2Renderer(canvas);
+      await renderer.init();
+      renderer.resize(size);
 
-    let alive = true;
-    window.__FX_OVERLAY_ALIVE__ = true;
+      __state.booted = true;
+      console.log("[FX] WebGL2 ink enabled (inkfix6)");
 
-    const tick = () => {
-      if (!alive) return;
+      // === listeners: capture까지 켠다 (Super/Next에서 이벤트 누락 방지) ===
+      const optsCap = { passive: true, capture: true };
+      const opts = { passive: true };
 
-      // detach protection (Next/Super DOM 교체 대비)
-      const c = document.getElementById(ID);
-      if (!c) {
-        document.body.appendChild(canvas);
-      } else if (!c.parentNode) {
-        document.body.appendChild(c);
-      }
+      const hPointerMove = (e) => { onPointerMove(e); requestRectsRefresh(); };
+      const hPointerDown = () => { onPointerDown(); requestRectsRefresh(); };
+      const hPointerUp = () => { onPointerUp(); };
 
-      const s = resizeCanvas(canvas);
-      if (s.changed) {
-        renderer.resize(s);
+      const hMouseMove = (e) => { onMouseMove(e); requestRectsRefresh(); };
+      const hMouseDown = () => { onMouseDown(); requestRectsRefresh(); };
+      const hMouseUp = () => { onMouseUp(); };
+
+      // window + document 둘 다 받기
+      window.addEventListener("pointermove", hPointerMove, opts);
+      window.addEventListener("pointerdown", hPointerDown, opts);
+      window.addEventListener("pointerup", hPointerUp, opts);
+
+      document.addEventListener("pointermove", hPointerMove, optsCap);
+      document.addEventListener("pointerdown", hPointerDown, optsCap);
+      document.addEventListener("pointerup", hPointerUp, optsCap);
+
+      window.addEventListener("mousemove", hMouseMove, opts);
+      window.addEventListener("mousedown", hMouseDown, opts);
+      window.addEventListener("mouseup", hMouseUp, opts);
+
+      const hResize = () => { const s = resizeCanvas(canvas); renderer.resize(s); requestRectsRefresh(); };
+      const hScroll = () => { requestRectsRefresh(); };
+
+      window.addEventListener("resize", hResize, opts);
+      window.addEventListener("scroll", hScroll, opts);
+
+      const mo = new MutationObserver(() => {
+        refreshFxZones();
+        ensureDefaultZoneIfNone();
         requestRectsRefresh();
-      }
+      });
+      mo.observe(document.body, { childList: true, subtree: true, attributes: true });
 
-      renderer.frame({ ...s, input });
+      let alive = true;
+      const tick = () => {
+        if (!alive) return;
+
+        if (!document.getElementById(ID)) document.body.appendChild(canvas);
+
+        const s = resizeCanvas(canvas);
+        if (s.changed) { renderer.resize(s); requestRectsRefresh(); }
+        renderer.frame({ ...s, input });
+
+        requestAnimationFrame(tick);
+      };
       requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
 
-    window.__FX_OVERLAY__ = {
-      stop() {
-        alive = false;
-        window.__FX_OVERLAY_ALIVE__ = false;
-        mo.disconnect();
-        renderer.destroy();
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerdown", onDown);
-        window.removeEventListener("pointerup", onUp);
-      },
-      reattach() {
-        const c = document.getElementById(ID);
-        if (!c) return;
-        if (!c.parentNode) document.body.appendChild(c);
-        c.style.display = "block";
-        c.style.pointerEvents = "none";
-        if (DEBUG) console.log("[FX] reattach done");
-      },
-      status() {
-        const c = document.getElementById(ID);
-        return {
-          loaded: !!window.__FX_OVERLAY_LOADED__,
-          booted: !!window.__FX_OVERLAY_BOOTED__,
-          alive: !!window.__FX_OVERLAY_ALIVE__,
-          hasCanvas: !!c,
-          zones: document.querySelectorAll(FX_ZONE_SELECTOR).length,
-          ctx: c?.getContext ? (c.getContext("webgl2") ? "webgl2" : "none") : "none",
-        };
-      }
-    };
+      window.__FX_OVERLAY__ = {
+        stop() {
+          alive = false;
+          mo.disconnect();
+          renderer.destroy();
+
+          window.removeEventListener("pointermove", hPointerMove, opts);
+          window.removeEventListener("pointerdown", hPointerDown, opts);
+          window.removeEventListener("pointerup", hPointerUp, opts);
+
+          document.removeEventListener("pointermove", hPointerMove, optsCap);
+          document.removeEventListener("pointerdown", hPointerDown, optsCap);
+          document.removeEventListener("pointerup", hPointerUp, optsCap);
+
+          window.removeEventListener("mousemove", hMouseMove, opts);
+          window.removeEventListener("mousedown", hMouseDown, opts);
+          window.removeEventListener("mouseup", hMouseUp, opts);
+
+          window.removeEventListener("resize", hResize, opts);
+          window.removeEventListener("scroll", hScroll, opts);
+        },
+        status() { return ({ ...__state }); }
+      };
+    } catch (e) {
+      __state.lastErr = e?.message || e;
+      console.warn("[FX] boot failed:", e);
+      setBadge(`FX ${__state.version}\nboot failed:\n${String(__state.lastErr)}`);
+    }
   }
 
-  // DOM ready
   if (document.readyState === "complete" || document.readyState === "interactive") {
     boot();
   } else {
