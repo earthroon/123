@@ -10,9 +10,10 @@
   const FX_MAX_TEXT_NODES = 240;      // 성능 안전장치
   const FX_RECTS_REFRESH_MS = 120;    // DOM/스크롤 갱신 디바운스
 
+  // 근접도(옵션1)
   const FX_PROX_FAR_PX = 260;
 
-  // 0.35면 “있긴 한데 거의 티 안 남”
+  // 옵션2: 인터랙티브 요소 위에서는 잉크 강도를 줄인다
   const FX_UI_ATTEN_INTERACTIVE = 0.35;
 
   const INTERACTIVE_SELECTOR = [
@@ -27,7 +28,12 @@
   ].join(",");
 
   // ----------------------------
-  // 1) Canvas singleton
+  // 0) Debug
+  // ----------------------------
+  const DBG = !!window.__FX_DEBUG__;
+
+  // ----------------------------
+  // 1) Canvas singleton (+ inline style harden)
   // ----------------------------
   function ensureCanvas() {
     let c = document.getElementById(ID);
@@ -36,6 +42,15 @@
       c.id = ID;
       document.body.appendChild(c);
     }
+    // Super/Notion에서 head CSS가 흔들려도 무조건 보이게 인라인로 한번 더 못 박기
+    c.style.position = "fixed";
+    c.style.left = "0";
+    c.style.top = "0";
+    c.style.width = "100vw";
+    c.style.height = "100vh";
+    c.style.zIndex = "999999";
+    c.style.pointerEvents = "none";
+    c.style.display = "block";
     return c;
   }
 
@@ -57,29 +72,28 @@
   }
 
   // ----------------------------
-  // 3) Input state
+  // 3) Input state (init mouse to center to avoid (0,0) prox=0 lock)
   // ----------------------------
   const input = {
-    x: 0, y: 0,
+    x: Math.max(1, Math.floor(window.innerWidth * 0.5)),
+    y: Math.max(1, Math.floor(window.innerHeight * 0.5)),
     vx: 0, vy: 0,
     down: false,
     t: performance.now(),
-    moveCount: 0,
-    lastMoveAt: 0
+    moved: false,
   };
 
   function onPointerMove(e) {
     const now = performance.now();
     const dt = Math.max(1, now - input.t);
-    const nx = e.clientX;
-    const ny = e.clientY;
+    const nx = e.clientX ?? input.x;
+    const ny = e.clientY ?? input.y;
     input.vx = (nx - input.x) / dt;
     input.vy = (ny - input.y) / dt;
     input.x = nx;
     input.y = ny;
     input.t = now;
-    input.moveCount++;
-    input.lastMoveAt = now;
+    input.moved = true;
   }
   function onPointerDown() { input.down = true; }
   function onPointerUp() { input.down = false; }
@@ -118,7 +132,9 @@
     if (root) {
       root.setAttribute("data-fx-zone", "");
       fxZones = [root];
-      // console.log("[FX] default zone applied:", root);
+      if (DBG) console.log("[FX] default zone applied:", root);
+    } else {
+      console.warn("[FX] no root found for default zone");
     }
   }
 
@@ -244,9 +260,6 @@
 
       this.W = 0;
       this.H = 0;
-
-      this.lastFrameAt = 0;
-      this.lastRectCount = 0;
     }
 
     _compile(type, src) {
@@ -345,10 +358,11 @@
           (gl_VertexID == 2) ? 3.0 : -1.0
         );
         vec2 uv = 0.5 * (p + 1.0);
-        vUv = vec2(uv.x, 1.0 - uv.y);
+        vUv = vec2(uv.x, 1.0 - uv.y); // top-left origin
         gl_Position = vec4(p, 0.0, 1.0);
       }`;
 
+      // NOTE: 선배 버전 유지 (prox/zone: rectCount 없으면 1.0)
       const fsUpdate = `#version 300 es
       precision highp float;
       in vec2 vUv;
@@ -429,7 +443,6 @@
 
         float prox = (uRectCount > 0) ? mouseProximity(uMouse) : 1.0;
         deposit *= prox;
-
         deposit *= uUiAtten;
 
         ink.a = clamp(ink.a + deposit, 0.0, 1.0);
@@ -469,6 +482,7 @@
 
       void main() {
         vec4 ink = texture(uTex, vUv);
+
         float a = pow(clamp(ink.a, 0.0, 1.0), 1.35);
 
         float zone = (uRectCount > 0) ? inZones(vUv) : 1.0;
@@ -511,8 +525,8 @@
       gl.bindVertexArray(null);
 
       gl.disable(gl.DEPTH_TEST);
-      // ✅ 중요: BLEND는 init에서 기본 OFF로 두고, PASS별로 ON/OFF를 제어한다.
-      gl.disable(gl.BLEND);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     }
 
     resize({ w, h }) {
@@ -541,9 +555,6 @@
         if (rc >= FX_MAX_RECTS) break;
       }
 
-      this.lastRectCount = rc;
-      this.lastFrameAt = performance.now();
-
       const t = (performance.now() - this.start) / 1000;
 
       const mx = (input.x * dpr) / w;
@@ -559,14 +570,8 @@
       const nextIdx = 1 - this.cur;
 
       gl.bindVertexArray(this.vao);
-
-      // =========================
-      // PASS 1: UPDATE (FBO)
-      // ✅ 핵심 패치: UPDATE는 BLEND OFF (overwrite)
-      // =========================
-      gl.disable(gl.BLEND);
-
       gl.useProgram(this.progUpdate);
+
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo[nextIdx]);
       gl.viewport(0, 0, w, h);
 
@@ -591,17 +596,10 @@
 
       this.cur = nextIdx;
 
-      // =========================
-      // PASS 2: PRESENT (to screen)
-      // ✅ PRESENT는 BLEND ON (overlay compositing)
-      // =========================
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-
-      gl.useProgram(this.progPresent);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, w, h);
 
+      gl.useProgram(this.progPresent);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.tex[this.cur]);
       gl.uniform1i(this.uPresent.uTex, 0);
@@ -609,6 +607,7 @@
       gl.uniform1i(this.uPresent.uRectCount, rc);
       gl.uniform4fv(this.uPresent.uRects, rectData);
       gl.uniform1f(this.uPresent.uFeather, (14 * dpr) / Math.min(w, h));
+
       gl.uniform1f(this.uPresent.uUiAtten, uiAtten);
 
       gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -638,13 +637,8 @@
   }
 
   // ----------------------------
-  // 8) Boot
+  // 8) Boot (+ Super-safe event binding + status)
   // ----------------------------
-  let __booted = false;
-  let __lastErr = null;
-  let __renderer = null;
-  let __mo = null;
-
   async function boot() {
     if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
 
@@ -659,27 +653,32 @@
     try {
       renderer = new WebGL2Renderer(canvas);
       await renderer.init();
-      __renderer = renderer;
-      __booted = true;
-      console.log("[FX] WebGL2 ink enabled (blend fix applied)");
+      if (DBG) console.log("[FX] WebGL2 ink enabled");
     } catch (e) {
-      __lastErr = e?.message || String(e);
-      console.warn("[FX] WebGL2 failed. FX disabled:", __lastErr);
+      console.warn("[FX] WebGL2 failed. FX disabled:", e?.message || e);
       return;
     }
 
-    // Events
-    window.addEventListener("pointermove", (e) => {
-      onPointerMove(e);
-      requestRectsRefresh();
-    }, { passive: true });
+    // ---- 핵심 패치: 이벤트를 여러 레벨에 CAPTURE로 걸어 Super/Notion 변칙에 버티기
+    const onPM = (e) => { onPointerMove(e); requestRectsRefresh(); };
+    const onMM = (e) => { onPointerMove(e); requestRectsRefresh(); };
 
-    window.addEventListener("pointerdown", () => {
-      onPointerDown();
-      requestRectsRefresh();
-    }, { passive: true });
+    const optsCap = { passive: true, capture: true };
+    const optsBub = { passive: true, capture: false };
 
-    window.addEventListener("pointerup", onPointerUp, { passive: true });
+    // window / document / documentElement 모두에 설치 (중복이라도 괜찮고, “안 잡히는 케이스”가 사라짐)
+    window.addEventListener("pointermove", onPM, optsCap);
+    window.addEventListener("pointermove", onPM, optsBub);
+    document.addEventListener("pointermove", onPM, optsCap);
+    document.addEventListener("pointermove", onPM, optsBub);
+    document.documentElement.addEventListener("pointermove", onPM, optsCap);
+
+    window.addEventListener("mousemove", onMM, optsCap);
+    document.addEventListener("mousemove", onMM, optsCap);
+    document.documentElement.addEventListener("mousemove", onMM, optsCap);
+
+    window.addEventListener("pointerdown", () => { onPointerDown(); requestRectsRefresh(); }, { passive: true, capture: true });
+    window.addEventListener("pointerup", onPointerUp, { passive: true, capture: true });
 
     window.addEventListener("resize", () => {
       const s = resizeCanvas(canvas);
@@ -691,12 +690,12 @@
       requestRectsRefresh();
     }, { passive: true });
 
-    __mo = new MutationObserver(() => {
+    const mo = new MutationObserver(() => {
       refreshFxZones();
       ensureDefaultZoneIfNone();
       requestRectsRefresh();
     });
-    __mo.observe(document.body, { childList: true, subtree: true, attributes: true });
+    mo.observe(document.body, { childList: true, subtree: true, attributes: true });
 
     renderer.resize(size);
 
@@ -717,43 +716,38 @@
     };
     requestAnimationFrame(tick);
 
+    // status() 추가: 이제 undefined로 안 죽음
     window.__FX_OVERLAY__ = {
       stop() {
         alive = false;
-        __mo?.disconnect?.();
+        mo.disconnect();
         renderer.destroy();
+        try { window.removeEventListener("pointerup", onPointerUp, { capture: true }); } catch(_) {}
       },
       status() {
         const c = document.getElementById(ID);
         const cs = c ? getComputedStyle(c) : null;
         return {
-          booted: __booted,
-          lastErr: __lastErr,
-          hasCanvas: !!c,
+          booted: true,
+          inDOM: !!c,
+          ctx: renderer?.gl ? "webgl2" : null,
+          zones: fxZones.length,
+          rects: rectCache.length,
+          moved: !!input.moved,
+          mouse: [input.x, input.y],
+          vel: [input.vx, input.vy],
+          down: input.down,
           display: cs?.display,
+          opacity: cs?.opacity,
           zIndex: cs?.zIndex,
-          pointerEvents: cs?.pointerEvents,
-          zones: document.querySelectorAll("[data-fx-zone]").length,
-          rectsCached: rectCache.length,
-          input: {
-            moveCount: input.moveCount,
-            lastMoveMsAgo: input.lastMoveAt ? Math.round(performance.now() - input.lastMoveAt) : null,
-            down: input.down,
-            x: Math.round(input.x),
-            y: Math.round(input.y),
-          },
-          render: __renderer ? {
-            lastFrameMsAgo: __renderer.lastFrameAt ? Math.round(performance.now() - __renderer.lastFrameAt) : null,
-            lastRectCount: __renderer.lastRectCount
-          } : null
         };
       }
     };
+
+    if (DBG) console.log("[FX] boot complete", window.__FX_OVERLAY__.status());
   }
 
-  if (document.readyState === "complete" || document.readyState === "interactive") {
-    boot();
-  } else {
-    document.addEventListener("DOMContentLoaded", boot, { once: true });
-  }
+  // Super는 종종 “DOM 준비 후에” 헤드 스크립트를 주입함 → 즉시 boot가 더 안전
+  try { boot(); } catch (_) {}
+
 })();
