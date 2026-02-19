@@ -17,23 +17,26 @@
   const FX_UI_ATTEN_INTERACTIVE = 0.35;
 
   const INTERACTIVE_SELECTOR = [
-    "a",
-    "button",
-    "input",
-    "textarea",
-    "select",
-    "[role='button']",
-    "[role='link']",
-    "[contenteditable='true']"
+    "a","button","input","textarea","select",
+    "[role='button']","[role='link']","[contenteditable='true']"
   ].join(",");
 
   // ----------------------------
-  // 0) Debug
+  // 0) Internal debug counters
   // ----------------------------
-  const DBG = !!window.__FX_DEBUG__;
+  const dbg = {
+    booted: false,
+    lastInputAt: 0,
+    moves: 0,
+    downs: 0,
+    ups: 0,
+    lastMoveXY: [0,0],
+    rectCount: 0,
+    zoneCount: 0,
+  };
 
   // ----------------------------
-  // 1) Canvas singleton (+ inline style harden)
+  // 1) Canvas singleton
   // ----------------------------
   function ensureCanvas() {
     let c = document.getElementById(ID);
@@ -42,15 +45,6 @@
       c.id = ID;
       document.body.appendChild(c);
     }
-    // Super/Notion에서 head CSS가 흔들려도 무조건 보이게 인라인로 한번 더 못 박기
-    c.style.position = "fixed";
-    c.style.left = "0";
-    c.style.top = "0";
-    c.style.width = "100vw";
-    c.style.height = "100vh";
-    c.style.zIndex = "999999";
-    c.style.pointerEvents = "none";
-    c.style.display = "block";
     return c;
   }
 
@@ -72,31 +66,44 @@
   }
 
   // ----------------------------
-  // 3) Input state (init mouse to center to avoid (0,0) prox=0 lock)
+  // 3) Input state
   // ----------------------------
   const input = {
-    x: Math.max(1, Math.floor(window.innerWidth * 0.5)),
-    y: Math.max(1, Math.floor(window.innerHeight * 0.5)),
+    x: Math.round(window.innerWidth * 0.5),
+    y: Math.round(window.innerHeight * 0.5),
     vx: 0, vy: 0,
     down: false,
     t: performance.now(),
-    moved: false,
   };
 
-  function onPointerMove(e) {
+  function onPointerMoveLike(e) {
     const now = performance.now();
     const dt = Math.max(1, now - input.t);
     const nx = e.clientX ?? input.x;
     const ny = e.clientY ?? input.y;
+
     input.vx = (nx - input.x) / dt;
     input.vy = (ny - input.y) / dt;
     input.x = nx;
     input.y = ny;
     input.t = now;
-    input.moved = true;
+
+    dbg.lastInputAt = now;
+    dbg.moves++;
+    dbg.lastMoveXY = [nx, ny];
   }
-  function onPointerDown() { input.down = true; }
-  function onPointerUp() { input.down = false; }
+
+  function onDownLike() {
+    input.down = true;
+    dbg.lastInputAt = performance.now();
+    dbg.downs++;
+  }
+
+  function onUpLike() {
+    input.down = false;
+    dbg.lastInputAt = performance.now();
+    dbg.ups++;
+  }
 
   // ----------------------------
   // 4) Renderer interface
@@ -118,6 +125,7 @@
 
   function refreshFxZones() {
     fxZones = Array.from(document.querySelectorAll(FX_ZONE_SELECTOR));
+    dbg.zoneCount = fxZones.length;
   }
 
   function ensureDefaultZoneIfNone() {
@@ -132,7 +140,8 @@
     if (root) {
       root.setAttribute("data-fx-zone", "");
       fxZones = [root];
-      if (DBG) console.log("[FX] default zone applied:", root);
+      dbg.zoneCount = 1;
+      console.log("[FX] default zone applied:", root);
     } else {
       console.warn("[FX] no root found for default zone");
     }
@@ -198,6 +207,7 @@
       if (rects.length >= FX_MAX_RECTS) break;
     }
     rectCache = rects;
+    dbg.rectCount = rectCache.length;
     lastRectRefreshAt = performance.now();
   }
 
@@ -245,19 +255,14 @@
       if (!this.gl) throw new Error("WebGL2 not available");
 
       this.start = performance.now();
-
       this.progUpdate = null;
       this.progPresent = null;
-
       this.uUpdate = {};
       this.uPresent = {};
-
       this.fbo = [null, null];
       this.tex = [null, null];
       this.cur = 0;
-
       this.vao = null;
-
       this.W = 0;
       this.H = 0;
     }
@@ -358,11 +363,10 @@
           (gl_VertexID == 2) ? 3.0 : -1.0
         );
         vec2 uv = 0.5 * (p + 1.0);
-        vUv = vec2(uv.x, 1.0 - uv.y); // top-left origin
+        vUv = vec2(uv.x, 1.0 - uv.y);
         gl_Position = vec4(p, 0.0, 1.0);
       }`;
 
-      // NOTE: 선배 버전 유지 (prox/zone: rectCount 없으면 1.0)
       const fsUpdate = `#version 300 es
       precision highp float;
       in vec2 vUv;
@@ -443,6 +447,7 @@
 
         float prox = (uRectCount > 0) ? mouseProximity(uMouse) : 1.0;
         deposit *= prox;
+
         deposit *= uUiAtten;
 
         ink.a = clamp(ink.a + deposit, 0.0, 1.0);
@@ -482,7 +487,6 @@
 
       void main() {
         vec4 ink = texture(uTex, vUv);
-
         float a = pow(clamp(ink.a, 0.0, 1.0), 1.35);
 
         float zone = (uRectCount > 0) ? inZones(vUv) : 1.0;
@@ -539,9 +543,9 @@
       this._ensurePingPong(w, h);
 
       const rectsPx = getCachedTextRectsPx();
-
       const rectData = new Float32Array(FX_MAX_RECTS * 4);
       let rc = 0;
+
       for (const r of rectsPx) {
         const x0 = (r.x * dpr) / w;
         const y0 = (r.y * dpr) / h;
@@ -554,12 +558,11 @@
         rc++;
         if (rc >= FX_MAX_RECTS) break;
       }
+      dbg.rectCount = rc;
 
       const t = (performance.now() - this.start) / 1000;
-
       const mx = (input.x * dpr) / w;
       const my = (input.y * dpr) / h;
-
       const velx = (input.vx * dpr) / w;
       const vely = (input.vy * dpr) / h;
 
@@ -570,8 +573,9 @@
       const nextIdx = 1 - this.cur;
 
       gl.bindVertexArray(this.vao);
-      gl.useProgram(this.progUpdate);
 
+      // UPDATE
+      gl.useProgram(this.progUpdate);
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo[nextIdx]);
       gl.viewport(0, 0, w, h);
 
@@ -588,14 +592,13 @@
       gl.uniform1i(this.uUpdate.uRectCount, rc);
       gl.uniform4fv(this.uUpdate.uRects, rectData);
       gl.uniform1f(this.uUpdate.uFeather, (14 * dpr) / Math.min(w, h));
-
       gl.uniform1f(this.uUpdate.uProxFar, proxFarUv);
       gl.uniform1f(this.uUpdate.uUiAtten, uiAtten);
 
       gl.drawArrays(gl.TRIANGLES, 0, 3);
-
       this.cur = nextIdx;
 
+      // PRESENT
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, w, h);
 
@@ -607,7 +610,6 @@
       gl.uniform1i(this.uPresent.uRectCount, rc);
       gl.uniform4fv(this.uPresent.uRects, rectData);
       gl.uniform1f(this.uPresent.uFeather, (14 * dpr) / Math.min(w, h));
-
       gl.uniform1f(this.uPresent.uUiAtten, uiAtten);
 
       gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -637,10 +639,46 @@
   }
 
   // ----------------------------
-  // 8) Boot (+ Super-safe event binding + status)
+  // 8) Boot
   // ----------------------------
+  function armInputListeners() {
+    const optsCap = { passive: true, capture: true };
+    const optsBub = { passive: true, capture: false };
+
+    const docEl = document.documentElement;
+
+    // pointer
+    window.addEventListener("pointermove", onPointerMoveLike, optsCap);
+    window.addEventListener("pointermove", onPointerMoveLike, optsBub);
+    document.addEventListener("pointermove", onPointerMoveLike, optsCap);
+    document.addEventListener("pointermove", onPointerMoveLike, optsBub);
+    docEl && docEl.addEventListener("pointermove", onPointerMoveLike, optsCap);
+    docEl && docEl.addEventListener("pointermove", onPointerMoveLike, optsBub);
+
+    window.addEventListener("pointerdown", onDownLike, optsCap);
+    window.addEventListener("pointerdown", onDownLike, optsBub);
+    window.addEventListener("pointerup", onUpLike, optsCap);
+    window.addEventListener("pointerup", onUpLike, optsBub);
+
+    // mouse fallback (일부 환경에서 pointer가 weird하면 이걸로라도 산다)
+    window.addEventListener("mousemove", onPointerMoveLike, optsCap);
+    window.addEventListener("mousemove", onPointerMoveLike, optsBub);
+    document.addEventListener("mousemove", onPointerMoveLike, optsCap);
+    document.addEventListener("mousemove", onPointerMoveLike, optsBub);
+    docEl && docEl.addEventListener("mousemove", onPointerMoveLike, optsCap);
+    docEl && docEl.addEventListener("mousemove", onPointerMoveLike, optsBub);
+
+    window.addEventListener("mousedown", onDownLike, optsCap);
+    window.addEventListener("mouseup", onUpLike, optsCap);
+
+    console.log("[FX] input listeners armed (window/doc/docEl, pointer+mouse, cap+bub)");
+  }
+
   async function boot() {
-    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      console.warn("[FX] reduced motion enabled; FX disabled");
+      return;
+    }
 
     const canvas = ensureCanvas();
     const size = resizeCanvas(canvas);
@@ -653,42 +691,22 @@
     try {
       renderer = new WebGL2Renderer(canvas);
       await renderer.init();
-      if (DBG) console.log("[FX] WebGL2 ink enabled");
+      console.log("[FX] WebGL2 ink enabled (inkfix7)");
     } catch (e) {
       console.warn("[FX] WebGL2 failed. FX disabled:", e?.message || e);
       return;
     }
 
-    // ---- 핵심 패치: 이벤트를 여러 레벨에 CAPTURE로 걸어 Super/Notion 변칙에 버티기
-    const onPM = (e) => { onPointerMove(e); requestRectsRefresh(); };
-    const onMM = (e) => { onPointerMove(e); requestRectsRefresh(); };
+    armInputListeners();
 
-    const optsCap = { passive: true, capture: true };
-    const optsBub = { passive: true, capture: false };
-
-    // window / document / documentElement 모두에 설치 (중복이라도 괜찮고, “안 잡히는 케이스”가 사라짐)
-    window.addEventListener("pointermove", onPM, optsCap);
-    window.addEventListener("pointermove", onPM, optsBub);
-    document.addEventListener("pointermove", onPM, optsCap);
-    document.addEventListener("pointermove", onPM, optsBub);
-    document.documentElement.addEventListener("pointermove", onPM, optsCap);
-
-    window.addEventListener("mousemove", onMM, optsCap);
-    document.addEventListener("mousemove", onMM, optsCap);
-    document.documentElement.addEventListener("mousemove", onMM, optsCap);
-
-    window.addEventListener("pointerdown", () => { onPointerDown(); requestRectsRefresh(); }, { passive: true, capture: true });
-    window.addEventListener("pointerup", onPointerUp, { passive: true, capture: true });
-
+    // layout change watchers
     window.addEventListener("resize", () => {
       const s = resizeCanvas(canvas);
       renderer.resize(s);
       requestRectsRefresh();
     }, { passive: true });
 
-    window.addEventListener("scroll", () => {
-      requestRectsRefresh();
-    }, { passive: true });
+    window.addEventListener("scroll", () => requestRectsRefresh(), { passive: true });
 
     const mo = new MutationObserver(() => {
       refreshFxZones();
@@ -700,6 +718,8 @@
     renderer.resize(size);
 
     let alive = true;
+    dbg.booted = true;
+
     const tick = () => {
       if (!alive) return;
 
@@ -716,38 +736,36 @@
     };
     requestAnimationFrame(tick);
 
-    // status() 추가: 이제 undefined로 안 죽음
     window.__FX_OVERLAY__ = {
       stop() {
         alive = false;
         mo.disconnect();
         renderer.destroy();
-        try { window.removeEventListener("pointerup", onPointerUp, { capture: true }); } catch(_) {}
+        console.log("[FX] stopped");
       },
       status() {
-        const c = document.getElementById(ID);
-        const cs = c ? getComputedStyle(c) : null;
         return {
-          booted: true,
-          inDOM: !!c,
-          ctx: renderer?.gl ? "webgl2" : null,
-          zones: fxZones.length,
-          rects: rectCache.length,
-          moved: !!input.moved,
-          mouse: [input.x, input.y],
-          vel: [input.vx, input.vy],
-          down: input.down,
-          display: cs?.display,
-          opacity: cs?.opacity,
-          zIndex: cs?.zIndex,
+          booted: dbg.booted,
+          zones: dbg.zoneCount,
+          rects: dbg.rectCount,
+          moves: dbg.moves,
+          downs: dbg.downs,
+          ups: dbg.ups,
+          lastXY: dbg.lastMoveXY,
+          lastInputMsAgo: dbg.lastInputAt ? Math.round(performance.now() - dbg.lastInputAt) : null,
+          canvas: !!document.getElementById(ID),
+          hasGL: !!(canvas && canvas.getContext && canvas.getContext("webgl2")),
+          href: location.href
         };
       }
     };
 
-    if (DBG) console.log("[FX] boot complete", window.__FX_OVERLAY__.status());
+    console.log("[FX] boot complete", window.__FX_OVERLAY__.status());
   }
 
-  // Super는 종종 “DOM 준비 후에” 헤드 스크립트를 주입함 → 즉시 boot가 더 안전
-  try { boot(); } catch (_) {}
-
+  if (document.readyState === "complete" || document.readyState === "interactive") {
+    boot();
+  } else {
+    document.addEventListener("DOMContentLoaded", boot, { once: true });
+  }
 })();
